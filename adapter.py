@@ -94,11 +94,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         }
 
         # Runtime state
-        self._mc = None  # MeshCore client instance
+        self._mc = None  # MeshCore client instance (receive-only, may go stale)
         self._subscriptions: list = []
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
         self._path_hash_size: int = 1  # Default 1-byte, updated on connect
+        self._poll_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -196,8 +197,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         )
         self._subscriptions.append(dm_sub)
 
-        # Start auto-fetching messages from the device
-        await self._mc.start_auto_message_fetching()
+        # Start polling loop — opens a fresh connection every 15s to fetch
+        # messages, because the main connection's auto-fetch dies silently.
+        self._poll_task = asyncio.create_task(self._poll_loop())
 
         # Fetch path hash size for correct path interpretation
         try:
@@ -217,6 +219,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from the MeshCore node."""
+        # Cancel poll loop
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
+
         self._mark_disconnected()
 
         if self._mc:
@@ -228,11 +235,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
             self._subscriptions.clear()
 
             try:
-                await self._mc.stop_auto_message_fetching()
-            except Exception:
-                pass
-
-            try:
                 await self._mc.disconnect()
             except Exception:
                 pass
@@ -241,6 +243,56 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self._contacts.clear()
         self._discovered_channels.clear()
+
+    async def _poll_loop(self) -> None:
+        """Open a fresh connection every 15s to fetch waiting messages.
+        The main connection's auto-fetch dies silently under load, so
+        we poll with fresh connections instead."""
+        from meshcore import MeshCore as MC, EventType as MCEventType
+        while True:
+            await asyncio.sleep(15)
+            if not self._mc:
+                return
+            try:
+                poll_mc = await MC.create_tcp(self.host, self.port)
+                # Load channel secrets so messages are decrypted
+                poll_mc.set_decrypt_channel_logs = True
+                for idx in range(4):
+                    try:
+                        await poll_mc.commands.get_channel(idx)
+                    except Exception:
+                        pass
+                # Fetch messages
+                await poll_mc.start_auto_message_fetching()
+                # Subscribe to events and let them flow for a few seconds
+                loop = asyncio.get_event_loop()
+                messages_received = []
+
+                def on_channel_msg(event):
+                    messages_received.append(('channel', event))
+
+                def on_contact_msg(event):
+                    messages_received.append(('dm', event))
+
+                poll_mc.subscribe(MCEventType.CHANNEL_MSG_RECV, on_channel_msg)
+                poll_mc.subscribe(MCEventType.CONTACT_MSG_RECV, on_contact_msg)
+
+                # Wait 3 seconds for messages to arrive
+                await asyncio.sleep(3)
+
+                # Dispatch any received messages
+                for msg_type, event in messages_received:
+                    if msg_type == 'channel':
+                        await self._handle_channel_message(event)
+                    else:
+                        await self._handle_direct_message(event)
+
+                await poll_mc.stop_auto_message_fetching()
+                await poll_mc.disconnect()
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.debug("MeshCore: poll cycle error: %s", e)
 
     # ── Node management (admin-only runtime operations) ───────────────────
 
