@@ -5,15 +5,6 @@ A plugin-based gateway adapter that connects to a MeshCore companion radio
 node via TCP and relays channel messages and DMs to the Hermes agent.
 Uses the ``meshcore_py`` library for the MeshCore protocol.
 
-Architecture: TWO independent TCP connections to the node.
-- ``_mc_send`` — dedicated to sending messages. Has contacts loaded.
-- ``_mc_poll`` — dedicated to polling for incoming messages. Has channel
-  secrets loaded. Runs a get_msg() loop every 2 seconds.
-
-The node firmware supports multiple TCP clients. By separating send and
-poll onto different connections, there is zero possibility of command
-racing — no locks needed, no event stealing, no silent poll-loop death.
-
 Configuration via environment variables (or config.yaml extra)::
 
     MESHCORE_HOST=mchome
@@ -102,16 +93,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
             u.strip() for u in allowed_raw.split(",") if u.strip()
         }
 
-        # Runtime state — dual connections
-        self._mc_send = None   # Dedicated send connection (has contacts)
-        self._mc_poll = None   # Dedicated poll connection (has channel secrets)
-        self._poll_subscriptions: list = []
+        # Runtime state
+        self._mc = None
+        self._subscriptions: list = []
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
         self._path_hash_size: int = 1
         self._last_message_time: float = 0.0
         self._watchdog_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._sending: bool = False  # Flag: skip poll while send is in progress
 
     @property
     def name(self) -> str:
@@ -120,7 +111,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> bool:
-        """Connect both send and poll connections to the MeshCore node."""
+        """Connect to the MeshCore node via TCP and subscribe to events."""
         if not self.host:
             logger.error("MeshCore: MESHCORE_HOST must be configured")
             self._set_fatal_error(
@@ -141,87 +132,75 @@ class MeshCoreAdapter(BasePlatformAdapter):
             )
             return False
 
-        # ── Send connection ──────────────────────────────────────────────
         try:
-            self._mc_send = await MeshCore.create_tcp(self.host, self.port)
-            logger.info("MeshCore: send connection established to %s:%s", self.host, self.port)
+            self._mc = await MeshCore.create_tcp(self.host, self.port)
+            logger.info("MeshCore: connected to %s:%s", self.host, self.port)
         except Exception as e:
-            logger.error("MeshCore: send connection failed — %s", e)
+            logger.error("MeshCore: failed to connect to %s:%s — %s", self.host, self.port, e)
             self._set_fatal_error("connect_failed", str(e), retryable=True)
             return False
 
-        # Load contacts on send connection
+        # Load contacts and trigger exchange
         try:
-            await self._mc_send.ensure_contacts()
-            result = await self._mc_send.commands.get_contacts()
+            await self._mc.ensure_contacts()
+            result = await self._mc.commands.get_contacts()
             if self._safe_result(result):
                 self._contacts = result.payload or {}
                 logger.info("MeshCore: loaded %d contacts", len(self._contacts))
         except Exception as e:
             logger.warning("MeshCore: failed to load contacts: %s", e)
 
-        # Send flood advert
+        # Send flood advert so other nodes can discover us
         try:
-            await self._mc_send.commands.send_advert(flood=True)
+            await self._mc.commands.send_advert(flood=True)
             logger.info("MeshCore: sent flood advert for node discovery")
         except Exception as e:
             logger.warning("MeshCore: advert send failed: %s", e)
 
-        # ── Poll connection ──────────────────────────────────────────────
+        # Subscribe to new contacts
+        new_contact_sub = self._mc.subscribe(
+            MCEventType.NEW_CONTACT,
+            self._handle_new_contact,
+        )
+        self._subscriptions.append(new_contact_sub)
+
+        # Load channel decryption secrets
         try:
-            self._mc_poll = await MeshCore.create_tcp(self.host, self.port)
-            logger.info("MeshCore: poll connection established to %s:%s", self.host, self.port)
+            self._mc.set_decrypt_channel_logs = True
+            channels_to_load = set(self.monitor_channels or [])
+            for i in range(4):
+                channels_to_load.add(i)
+            for idx in sorted(channels_to_load):
+                result = await self._mc.commands.get_channel(idx)
+                if self._safe_result(result):
+                    ch = result.payload
+                    name = ch.get("channel_name", "")
+                    self._discovered_channels.add(idx)
+                    if name:
+                        logger.info("MeshCore: loaded channel %d: %s", idx, name)
         except Exception as e:
-            logger.error("MeshCore: poll connection failed — %s", e)
-            # Send connection is up, try to continue with just that
-            self._mc_poll = None
+            logger.warning("MeshCore: failed to load channel secrets: %s", e)
 
-        if self._mc_poll:
-            # Load channel secrets on poll connection so it can decrypt
-            # and deliver channel messages.
-            try:
-                self._mc_poll.set_decrypt_channel_logs = True
-                channels_to_load = set(self.monitor_channels or [])
-                for i in range(4):
-                    channels_to_load.add(i)
-                for idx in sorted(channels_to_load):
-                    result = await self._mc_poll.commands.get_channel(idx)
-                    if self._safe_result(result):
-                        ch = result.payload
-                        name = ch.get("channel_name", "")
-                        self._discovered_channels.add(idx)
-                        if name:
-                            logger.info("MeshCore: loaded channel %d: %s", idx, name)
-            except Exception as e:
-                logger.warning("MeshCore: failed to load channel secrets: %s", e)
+        # Subscribe to channel messages
+        chan_sub = self._mc.subscribe(
+            MCEventType.CHANNEL_MSG_RECV,
+            self._handle_channel_message,
+        )
+        self._subscriptions.append(chan_sub)
 
-            # Subscribe to channel messages on poll connection
-            chan_sub = self._mc_poll.subscribe(
-                MCEventType.CHANNEL_MSG_RECV,
-                self._handle_channel_message,
-            )
-            self._poll_subscriptions.append(chan_sub)
+        # Subscribe to direct messages
+        dm_sub = self._mc.subscribe(
+            MCEventType.CONTACT_MSG_RECV,
+            self._handle_direct_message,
+        )
+        self._subscriptions.append(dm_sub)
 
-            # Subscribe to direct messages on poll connection
-            dm_sub = self._mc_poll.subscribe(
-                MCEventType.CONTACT_MSG_RECV,
-                self._handle_direct_message,
-            )
-            self._poll_subscriptions.append(dm_sub)
+        # Start manual message polling
+        self._start_poll_loop()
 
-            # Subscribe to new contacts on poll connection
-            new_contact_sub = self._mc_poll.subscribe(
-                MCEventType.NEW_CONTACT,
-                self._handle_new_contact,
-            )
-            self._poll_subscriptions.append(new_contact_sub)
-
-            # Start manual poll loop on poll connection
-            self._start_poll_loop()
-
-        # Fetch path hash size (use send connection)
+        # Fetch path hash size
         try:
-            phm = await self._mc_send.commands.get_path_hash_mode()
+            phm = await self._mc.commands.get_path_hash_mode()
             self._path_hash_size = phm + 1
             logger.info("MeshCore: path hash size = %d-byte", self._path_hash_size)
         except Exception:
@@ -229,7 +208,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self._mark_connected()
         logger.info(
-            "MeshCore: connected (dual-channel), monitoring channels%s, DMs %s",
+            "MeshCore: connected, monitoring channels%s, DMs %s",
             f" {sorted(self.monitor_channels) if self.monitor_channels else '(discovery mode)'}",
             "enabled" if self.enable_dms else "disabled",
         )
@@ -237,40 +216,38 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        """Disconnect both connections."""
+        """Disconnect from the MeshCore node."""
         self._stop_watchdogs()
         self._mark_disconnected()
 
-        for mc, subs in [(self._mc_poll, self._poll_subscriptions), (self._mc_send, [])]:
-            if mc:
-                for sub in subs:
-                    try:
-                        mc.unsubscribe(sub)
-                    except Exception:
-                        pass
+        if self._mc:
+            for sub in self._subscriptions:
                 try:
-                    await mc.disconnect()
+                    self._mc.unsubscribe(sub)
                 except Exception:
                     pass
+            self._subscriptions.clear()
 
-        self._poll_subscriptions.clear()
-        self._mc_send = None
-        self._mc_poll = None
+            try:
+                await self._mc.disconnect()
+            except Exception:
+                pass
+
+            self._mc = None
+
         self._contacts.clear()
         self._discovered_channels.clear()
 
     # ── Node management (admin-only runtime operations) ───────────────────
 
     async def get_node_info(self) -> Dict[str, Any]:
-        """Get device info, battery, and stats from the connected node."""
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
 
         info: Dict[str, Any] = {}
 
         try:
-            result = await mc.commands.send_device_query()
+            result = await self._mc.commands.send_device_query()
             if self._safe_result(result):
                 info["device"] = result.payload
                 phm = result.payload.get("path_hash_mode")
@@ -281,21 +258,21 @@ class MeshCoreAdapter(BasePlatformAdapter):
             info["device_error"] = str(e)
 
         try:
-            result = await mc.commands.send_appstart()
+            result = await self._mc.commands.send_appstart()
             if self._safe_result(result):
                 info["self"] = result.payload
         except Exception as e:
             info["self_error"] = str(e)
 
         try:
-            result = await mc.commands.get_bat()
+            result = await self._mc.commands.get_bat()
             if self._safe_result(result):
                 info["battery"] = result.payload
         except Exception as e:
             info["battery_error"] = str(e)
 
         try:
-            result = await mc.commands.get_self_telemetry()
+            result = await self._mc.commands.get_self_telemetry()
             if self._safe_result(result):
                 info["telemetry"] = result.payload
         except Exception as e:
@@ -308,10 +285,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return info
 
     async def get_channel_info(self, channel_idx: int) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        result = await mc.commands.get_channel(channel_idx)
+        result = await self._mc.commands.get_channel(channel_idx)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return result.payload
@@ -319,8 +295,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def set_channel_config(
         self, channel_idx: int, name: str, secret_hex: Optional[str] = None
     ) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
         secret = None
         if secret_hex:
@@ -328,7 +303,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 secret = bytes.fromhex(secret_hex)
             except ValueError:
                 return {"error": "Invalid hex secret — must be 32 hex chars (16 bytes)"}
-        result = await mc.commands.set_channel(channel_idx, name, secret)
+        result = await self._mc.commands.set_channel(channel_idx, name, secret)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "channel_idx": channel_idx, "name": name}
@@ -336,28 +311,25 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def set_radio_params(
         self, freq: float, bw: float, sf: int, cr: int
     ) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        result = await mc.commands.set_radio(freq, bw, sf, cr)
+        result = await self._mc.commands.set_radio(freq, bw, sf, cr)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "freq": freq, "bw": bw, "sf": sf, "cr": cr}
 
     async def set_tx_power(self, power: int) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        result = await mc.commands.set_tx_power(power)
+        result = await self._mc.commands.set_tx_power(power)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "tx_power": power}
 
     async def set_node_name(self, name: str) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        result = await mc.commands.set_name(name)
+        result = await self._mc.commands.set_name(name)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "name": name}
@@ -365,10 +337,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def set_telemetry_modes(
         self, base: int = None, loc: int = None, env: int = None
     ) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        info = await mc.commands.send_appstart()
+        info = await self._mc.commands.send_appstart()
         if not self._safe_result(info):
             return {"error": f"Failed to get current settings: {info.payload if info else 'None'}"}
         infos = info.payload
@@ -378,7 +349,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             infos["telemetry_mode_loc"] = loc
         if env is not None:
             infos["telemetry_mode_env"] = env
-        result = await mc.commands.set_other_params_from_infos(infos)
+        result = await self._mc.commands.set_other_params_from_infos(infos)
         if not self._safe_result(result):
             return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "modes": {
@@ -388,21 +359,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
         }}
 
     async def reboot_node(self) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
-        await mc.commands.reboot()
+        await self._mc.commands.reboot()
         return {"success": True, "message": "Reboot command sent"}
 
     async def get_stats(self) -> Dict[str, Any]:
-        mc = self._mc_send or self._mc_poll
-        if not mc:
+        if not self._mc:
             return {"error": "Not connected"}
         stats = {}
         for name, method in [
-            ("core", mc.commands.get_stats_core),
-            ("radio", mc.commands.get_stats_radio),
-            ("packets", mc.commands.get_stats_packets),
+            ("core", self._mc.commands.get_stats_core),
+            ("radio", self._mc.commands.get_stats_radio),
+            ("packets", self._mc.commands.get_stats_packets),
         ]:
             try:
                 result = await method()
@@ -425,10 +394,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
     ):
         """Send a message back to a MeshCore channel or contact.
 
-        Uses the dedicated send connection — completely independent from
-        the poll connection. No command racing possible.
+        Sets _sending flag so the poll loop skips get_msg() while we're
+        sending — prevents command racing on the shared TCP channel
+        without the deadlock risk of an asyncio.Lock.
         """
-        if not self._mc_send:
+        if not self._mc:
             return SendResult(success=False, error="Not connected")
 
         raw_chunks = self._split_for_mesh(content, max_len=150)
@@ -447,42 +417,46 @@ class MeshCoreAdapter(BasePlatformAdapter):
         message_ids = []
         errors = []
 
-        for i, chunk in enumerate(chunks):
-            try:
-                if chat_id.startswith("channel:"):
-                    channel_idx = int(chat_id.split(":", 1)[1])
-                    result = None
-                    for attempt in range(3):
-                        result = await self._mc_send.commands.send_chan_msg(channel_idx, chunk)
-                        if result is not None and not result.is_error():
-                            break
-                        logger.debug("MeshCore: chan send attempt %d failed: %s",
-                                     attempt + 1,
-                                     result.payload if result else "None")
-                        await asyncio.sleep(1.0)
-                elif chat_id.startswith("dm:"):
-                    pubkey_prefix = chat_id.split(":", 1)[1]
-                    contact = self._mc_send.get_contact_by_key_prefix(pubkey_prefix)
-                    if contact is None:
-                        return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
-                    result = await self._mc_send.commands.send_msg_with_retry(
-                        contact, chunk, max_attempts=3
-                    )
-                else:
-                    return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
+        self._sending = True
+        try:
+            for i, chunk in enumerate(chunks):
+                try:
+                    if chat_id.startswith("channel:"):
+                        channel_idx = int(chat_id.split(":", 1)[1])
+                        result = None
+                        for attempt in range(3):
+                            result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                            if result is not None and not result.is_error():
+                                break
+                            logger.debug("MeshCore: chan send attempt %d failed: %s",
+                                         attempt + 1,
+                                         result.payload if result else "None")
+                            await asyncio.sleep(1.0)
+                    elif chat_id.startswith("dm:"):
+                        pubkey_prefix = chat_id.split(":", 1)[1]
+                        contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
+                        if contact is None:
+                            return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
+                        result = await self._mc.commands.send_msg_with_retry(
+                            contact, chunk, max_attempts=3
+                        )
+                    else:
+                        return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-                if result is None:
-                    errors.append(f"chunk {i+1}: send returned None (node busy)")
-                elif result.is_error():
-                    errors.append(f"chunk {i+1}: {result.payload}")
-                else:
-                    message_ids.append(str(int(time.time() * 1000)))
+                    if result is None:
+                        errors.append(f"chunk {i+1}: send returned None (node busy)")
+                    elif result.is_error():
+                        errors.append(f"chunk {i+1}: {result.payload}")
+                    else:
+                        message_ids.append(str(int(time.time() * 1000)))
 
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.5)
 
-            except Exception as e:
-                errors.append(f"chunk {i+1}: {e}")
+                except Exception as e:
+                    errors.append(f"chunk {i+1}: {e}")
+        finally:
+            self._sending = False
 
         if errors and not message_ids:
             return SendResult(success=False, error="; ".join(errors))
@@ -664,9 +638,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def _silence_watchdog(self) -> None:
         """Watch for message silence and auto-reconnect if the connection stalls."""
-        while self._mc_poll is not None or self._mc_send is not None:
+        while self._mc is not None:
             await asyncio.sleep(30)
-            if self._mc_poll is None and self._mc_send is None:
+            if self._mc is None:
                 return
             elapsed = time.time() - self._last_message_time
             if elapsed > 120 and self._last_message_time > 0:
@@ -676,17 +650,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 )
                 self._stop_watchdogs()
                 self._mark_disconnected()
-                old_send = self._mc_send
-                old_poll = self._mc_poll
-                self._mc_send = None
-                self._mc_poll = None
-                self._poll_subscriptions.clear()
-                for old in (old_send, old_poll):
-                    if old:
-                        try:
-                            await asyncio.wait_for(old.disconnect(), timeout=3.0)
-                        except Exception:
-                            pass
+                old_mc = self._mc
+                self._mc = None
+                self._subscriptions.clear()
+                try:
+                    await asyncio.wait_for(old_mc.disconnect(), timeout=3.0)
+                except Exception:
+                    pass
                 try:
                     ok = await self.connect()
                     if ok:
@@ -698,13 +668,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return
 
     def _start_watchdogs(self) -> None:
-        """Start silence watchdog background task."""
         if self._watchdog_task is None or self._watchdog_task.done():
             self._last_message_time = time.time()
             self._watchdog_task = asyncio.create_task(self._silence_watchdog())
 
     def _stop_watchdogs(self) -> None:
-        """Cancel watchdog and poll background tasks."""
         for task in (self._watchdog_task, self._poll_task):
             if task and not task.done():
                 task.cancel()
@@ -714,21 +682,25 @@ class MeshCoreAdapter(BasePlatformAdapter):
     # ── Manual message polling ─────────────────────────────────────────────
 
     def _start_poll_loop(self) -> None:
-        """Start a manual polling loop on the dedicated poll connection."""
+        """Start a manual polling loop that calls get_msg() every 2 seconds.
+
+        Skips polling when _sending is True to avoid command racing on
+        the shared TCP channel.
+        """
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def _poll_loop(self) -> None:
-        """Poll for new messages every 2 seconds on the poll connection.
-
-        Runs on a completely independent TCP connection from sends —
-        zero possibility of command racing or event stealing.
-        """
-        while self._mc_poll is not None:
-            try:
-                await self._mc_poll.commands.get_msg()
-            except Exception as e:
-                logger.debug("MeshCore: poll error (non-fatal): %s", e)
+        """Poll for new messages every 2 seconds."""
+        while self._mc is not None:
+            # Skip poll if a send is in progress — prevents get_msg()
+            # from stealing the send's response event on the shared
+            # TCP command channel.
+            if not self._sending:
+                try:
+                    await self._mc.commands.get_msg()
+                except Exception as e:
+                    logger.debug("MeshCore: poll error (non-fatal): %s", e)
             await asyncio.sleep(2.0)
 
     async def _handle_new_contact(self, event):
