@@ -99,6 +99,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
         self._path_hash_size: int = 1  # Default 1-byte, updated on connect
+        self._last_message_time: float = 0.0  # For silence watchdog
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -140,7 +143,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         try:
             await self._mc.ensure_contacts()
             result = await self._mc.commands.get_contacts()
-            if not result.is_error():
+            if self._safe_result(result):
                 self._contacts = result.payload or {}
                 logger.info("MeshCore: loaded %d contacts", len(self._contacts))
         except Exception as e:
@@ -173,7 +176,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 channels_to_load.add(i)
             for idx in sorted(channels_to_load):
                 result = await self._mc.commands.get_channel(idx)
-                if not result.is_error():
+                if self._safe_result(result):
                     ch = result.payload
                     name = ch.get("channel_name", "")
                     self._discovered_channels.add(idx)
@@ -213,10 +216,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
             f" {sorted(self.monitor_channels) if self.monitor_channels else '(discovery mode)'}",
             "enabled" if self.enable_dms else "disabled",
         )
+        self._start_watchdogs()
         return True
 
     async def disconnect(self) -> None:
         """Disconnect from the MeshCore node."""
+        self._stop_watchdogs()
         self._mark_disconnected()
 
         if self._mc:
@@ -253,7 +258,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         try:
             result = await self._mc.commands.send_device_query()
-            if not result.is_error():
+            if self._safe_result(result):
                 info["device"] = result.payload
                 # Extract path_hash_mode for convenience
                 phm = result.payload.get("path_hash_mode")
@@ -265,21 +270,21 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         try:
             result = await self._mc.commands.send_appstart()
-            if not result.is_error():
+            if self._safe_result(result):
                 info["self"] = result.payload
         except Exception as e:
             info["self_error"] = str(e)
 
         try:
             result = await self._mc.commands.get_bat()
-            if not result.is_error():
+            if self._safe_result(result):
                 info["battery"] = result.payload
         except Exception as e:
             info["battery_error"] = str(e)
 
         try:
             result = await self._mc.commands.get_self_telemetry()
-            if not result.is_error():
+            if self._safe_result(result):
                 info["telemetry"] = result.payload
         except Exception as e:
             info["telemetry_error"] = str(e)
@@ -295,8 +300,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._mc:
             return {"error": "Not connected"}
         result = await self._mc.commands.get_channel(channel_idx)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return result.payload
 
     async def set_channel_config(
@@ -318,8 +323,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return {"error": "Invalid hex secret — must be 32 hex chars (16 bytes)"}
 
         result = await self._mc.commands.set_channel(channel_idx, name, secret)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "channel_idx": channel_idx, "name": name}
 
     async def set_radio_params(
@@ -330,8 +335,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._mc:
             return {"error": "Not connected"}
         result = await self._mc.commands.set_radio(freq, bw, sf, cr)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "freq": freq, "bw": bw, "sf": sf, "cr": cr}
 
     async def set_tx_power(self, power: int) -> Dict[str, Any]:
@@ -339,8 +344,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._mc:
             return {"error": "Not connected"}
         result = await self._mc.commands.set_tx_power(power)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "tx_power": power}
 
     async def set_node_name(self, name: str) -> Dict[str, Any]:
@@ -348,8 +353,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._mc:
             return {"error": "Not connected"}
         result = await self._mc.commands.set_name(name)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "name": name}
 
     async def set_telemetry_modes(
@@ -361,8 +366,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         # Get current settings first
         info = await self._mc.commands.send_appstart()
-        if info.is_error():
-            return {"error": f"Failed to get current settings: {info.payload}"}
+        if not self._safe_result(info):
+            return {"error": f"Failed to get current settings: {info.payload if info else 'None'}"}
 
         infos = info.payload
         if base is not None:
@@ -373,8 +378,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             infos["telemetry_mode_env"] = env
 
         result = await self._mc.commands.set_other_params_from_infos(infos)
-        if result.is_error():
-            return {"error": str(result.payload)}
+        if not self._safe_result(result):
+            return {"error": str(result.payload) if result else "Command returned None"}
         return {"success": True, "modes": {
             "base": infos.get("telemetry_mode_base"),
             "loc": infos.get("telemetry_mode_loc"),
@@ -401,10 +406,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         ]:
             try:
                 result = await method()
-                if not result.is_error():
+                if self._safe_result(result):
                     stats[name] = result.payload
                 else:
-                    stats[f"{name}_error"] = str(result.payload)
+                    stats[f"{name}_error"] = str(result.payload) if result else "Command returned None"
             except Exception as e:
                 stats[f"{name}_error"] = str(e)
         return stats
@@ -540,6 +545,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def _handle_channel_message(self, event):
         """Handle an incoming channel message from MeshCore."""
+        self._last_message_time = time.time()
         msg = event.payload
         channel_idx = msg.get("channel_idx")
         text = msg.get("text", "")
@@ -636,6 +642,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def _handle_direct_message(self, event):
         """Handle an incoming direct message from MeshCore."""
+        self._last_message_time = time.time()
         logger.info("MeshCore: DM received: %s", {k: v for k, v in event.payload.items() if k != 'raw'})
 
         if not self.enable_dms:
@@ -679,6 +686,74 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self.allowed_users:
             return True  # Empty allowlist = allow all
         return pubkey_prefix in self.allowed_users
+
+    # ── Auto-recovery ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_result(result) -> bool:
+        """Check if a command result is successful, treating None as failure."""
+        return result is not None and not result.is_error()
+
+    async def _keepalive_ping(self) -> None:
+        """Send periodic pings to prevent the node's TCP idle timeout (~120s).
+
+        Runs every 90s — well under the suspected 120s timeout. If the ping
+        fails, the silence watchdog will detect the stall and reconnect.
+        """
+        while self._mc is not None:
+            await asyncio.sleep(90)
+            if self._mc is None:
+                return
+            try:
+                result = await self._mc.commands.get_bat()
+                if self._safe_result(result):
+                    logger.debug("MeshCore: keepalive ping OK (bat=%s)", result.payload)
+                else:
+                    logger.warning("MeshCore: keepalive ping failed — connection may be stale")
+            except Exception as e:
+                logger.warning("MeshCore: keepalive ping error: %s", e)
+
+    async def _silence_watchdog(self) -> None:
+        """Watch for message silence and auto-reconnect if the connection stalls.
+
+        If no messages arrive for 120 seconds, the auto-fetch loop has likely
+        died (node TCP idle timeout). Disconnect and reconnect to revive it.
+        """
+        while self._mc is not None:
+            await asyncio.sleep(30)  # Check every 30s
+            if self._mc is None:
+                return
+            elapsed = time.time() - self._last_message_time
+            if elapsed > 120 and self._last_message_time > 0:
+                logger.warning(
+                    "MeshCore: silence watchdog triggered — no messages for %.0fs, reconnecting",
+                    elapsed,
+                )
+                try:
+                    await self.disconnect()
+                except Exception:
+                    pass
+                try:
+                    await self.connect()
+                except Exception as e:
+                    logger.error("MeshCore: watchdog reconnect failed: %s", e)
+                return  # connect() restarts the watchdog if successful
+
+    def _start_watchdogs(self) -> None:
+        """Start keepalive and silence watchdog background tasks."""
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_ping())
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._last_message_time = time.time()
+            self._watchdog_task = asyncio.create_task(self._silence_watchdog())
+
+    def _stop_watchdogs(self) -> None:
+        """Cancel watchdog background tasks."""
+        for task in (self._keepalive_task, self._watchdog_task):
+            if task and not task.done():
+                task.cancel()
+        self._keepalive_task = None
+        self._watchdog_task = None
 
     async def _handle_new_contact(self, event):
         """Handle a newly discovered contact."""
