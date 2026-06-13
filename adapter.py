@@ -473,7 +473,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self.host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
         self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
-        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "Jarvis")
+        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "Jarvis")  # fallback
 
         admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
         self.admin_nodes: Set[str] = {n.strip() for n in admin_raw.split(",") if n.strip()}
@@ -536,7 +536,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
             )
             if pkt_type == PKT_SELF_INFO:
                 self._self_info = MeshCoreRawConnection.parse_self_info(payload)
-                logger.info("MeshCore: self_info loaded, name=%s", self._self_info.get("name", "?"))
+                node_name = self._self_info.get("name", "")
+                if node_name:
+                    # Derive bot name from node name (strip emoji/suffixes for @mention matching)
+                    import re
+                    clean = re.sub(r'[^\w\s]', '', node_name).strip()
+                    self.bot_name = clean.split()[0] if clean else self.bot_name
+                logger.info("MeshCore: self_info loaded, name=%s, bot_name=%s",
+                             node_name, self.bot_name)
             else:
                 logger.warning("MeshCore: APP_START returned error: %s", payload.hex())
         except Exception as e:
@@ -798,7 +805,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     errors.append(f"chunk {i+1}: send failed")
                 if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
             except Exception as e:
                 errors.append(f"chunk {i+1}: {e}")
 
