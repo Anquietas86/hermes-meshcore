@@ -211,6 +211,20 @@ class MeshCoreRawConnection:
                 # Unsolicited message (e.g. push notification) — handle it
                 await self._handle_unsolicited(pkt_type, payload)
             logger.warning("MeshCore(raw): send_command TIMEOUT after %.1fs", timeout)
+            # Drain stale frames from TCP stream — the node's response may
+            # arrive after our deadline, poisoning the next command's read.
+            try:
+                drained = 0
+                while True:
+                    pkt_type, payload = await asyncio.wait_for(
+                        self.read_frame(), timeout=0.3)
+                    logger.debug("MeshCore(raw): drain stale type=0x%02x", pkt_type)
+                    await self._handle_unsolicited(pkt_type, payload)
+                    drained += 1
+            except (asyncio.TimeoutError, ConnectionError, Exception):
+                pass
+            if drained:
+                logger.debug("MeshCore(raw): drained %d stale frames after timeout", drained)
             return PKT_ERROR, b"\x01"  # timeout → generic error
 
     async def send_and_wait_ack(self, cmd_bytes: bytes,
@@ -805,7 +819,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             logger.debug("MeshCore: _send_channel_msg attempt=%d cmd=%s", attempt, cmd.hex()[:30])
             try:
                 pkt_type, payload = await self._conn.send_command(
-                    cmd, [PKT_OK, PKT_ERROR], timeout=10.0)
+                    cmd, [PKT_OK, PKT_ERROR], timeout=15.0)
                 logger.debug("MeshCore: _send_channel_msg result type=0x%02x payload=%s",
                              pkt_type, payload[:20].hex() if payload else "empty")
                 if pkt_type == PKT_OK:
