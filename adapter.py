@@ -380,9 +380,13 @@ class MeshCoreRawConnection:
         if plen == 255:
             msg["path_hash_mode"] = -1
             msg["path_len"] = 255
+            msg["path"] = ""
         else:
             msg["path_hash_mode"] = plen >> 6
             msg["path_len"] = plen & 0x3F
+            path_hash_size = 1 << msg["path_hash_mode"]  # 0→1, 1→2, 2→4, 3→8 bytes per hop
+            path_bytes = buf.read(msg["path_len"] * path_hash_size)
+            msg["path"] = path_bytes.hex()
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little", signed=False)
         msg["text"] = buf.read().decode("utf-8", "ignore")
