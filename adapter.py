@@ -245,54 +245,34 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._discovered_channels.clear()
 
     async def _poll_loop(self) -> None:
-        """Open a fresh connection every 15s to fetch waiting messages.
-        The main connection's auto-fetch dies silently under load, so
-        we poll with fresh connections instead."""
-        from meshcore import MeshCore as MC, EventType as MCEventType
+        """Reconnect the main connection every 60s. The node's TCP stack
+        goes stale after ~60s under load, but a fresh connection always
+        works. This keeps both send and receive healthy."""
         while True:
-            await asyncio.sleep(15)
+            await asyncio.sleep(60)
             if not self._mc:
                 return
             try:
-                poll_mc = await MC.create_tcp(self.host, self.port)
-                # Load channel secrets so messages are decrypted
-                poll_mc.set_decrypt_channel_logs = True
-                for idx in range(4):
+                logger.info("MeshCore: periodic reconnect...")
+                # Disconnect old connection
+                for sub in self._subscriptions:
                     try:
-                        await poll_mc.commands.get_channel(idx)
+                        self._mc.unsubscribe(sub)
                     except Exception:
                         pass
-                # Fetch messages
-                await poll_mc.start_auto_message_fetching()
-                # Subscribe to events and let them flow for a few seconds
-                loop = asyncio.get_event_loop()
-                messages_received = []
+                self._subscriptions.clear()
+                try:
+                    await self._mc.disconnect()
+                except Exception:
+                    pass
+                self._mc = None
 
-                def on_channel_msg(event):
-                    messages_received.append(('channel', event))
-
-                def on_contact_msg(event):
-                    messages_received.append(('dm', event))
-
-                poll_mc.subscribe(MCEventType.CHANNEL_MSG_RECV, on_channel_msg)
-                poll_mc.subscribe(MCEventType.CONTACT_MSG_RECV, on_contact_msg)
-
-                # Wait 3 seconds for messages to arrive
-                await asyncio.sleep(3)
-
-                # Dispatch any received messages
-                for msg_type, event in messages_received:
-                    if msg_type == 'channel':
-                        await self._handle_channel_message(event)
-                    else:
-                        await self._handle_direct_message(event)
-
-                await poll_mc.stop_auto_message_fetching()
-                await poll_mc.disconnect()
+                # Reconnect fresh
+                await self.connect()
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.debug("MeshCore: poll cycle error: %s", e)
+                logger.warning("MeshCore: periodic reconnect failed: %s", e)
 
     # ── Node management (admin-only runtime operations) ───────────────────
 
