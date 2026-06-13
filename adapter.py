@@ -500,7 +500,23 @@ class MeshCoreAdapter(BasePlatformAdapter):
         text = msg.get("text", "")
         pubkey_prefix = msg.get("pubkey_prefix", "")
 
-        logger.info("MeshCore: CHANNEL msg received: channel=%s text=%s", channel_idx, text[:60])
+        # Radio metadata (available when decrypt_channels is enabled)
+        rssi = msg.get("RSSI")
+        snr = msg.get("SNR")
+        path_len = msg.get("path_len")
+        path = msg.get("path")
+        sender_timestamp = msg.get("sender_timestamp")
+        attempt = msg.get("attempt")
+
+        logger.info(
+            "MeshCore: CHANNEL msg channel=%s from=%s text=%s rssi=%s snr=%s hops=%s",
+            channel_idx,
+            text.split(":", 1)[0].strip() if ":" in text else "?",
+            text[:60],
+            rssi,
+            snr,
+            path_len,
+        )
 
         # Track discovered channels
         if channel_idx is not None:
@@ -563,6 +579,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
             user_name=sender_name,
             is_admin=is_admin,
             channel_idx=channel_idx,
+            metadata={
+                "rssi": rssi,
+                "snr": snr,
+                "path_len": path_len,
+                "path": path,
+                "sender_timestamp": sender_timestamp,
+                "attempt": attempt,
+            },
         )
 
     async def _handle_direct_message(self, event):
@@ -629,6 +653,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         user_name: str,
         is_admin: bool = False,
         channel_idx: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Build a MessageEvent and hand it to the base class handler."""
         logger.info("MeshCore: _dispatch_message called chat=%s user=%s text=%s", chat_id, user_id, text[:40])
