@@ -98,6 +98,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._subscriptions: list = []
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
+        self._path_hash_size: int = 1  # Default 1-byte, updated on connect
 
     @property
     def name(self) -> str:
@@ -198,6 +199,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
         # Start auto-fetching messages from the device
         await self._mc.start_auto_message_fetching()
 
+        # Fetch path hash size for correct path interpretation
+        try:
+            phm = await self._mc.commands.get_path_hash_mode()
+            self._path_hash_size = phm + 1  # 0=1-byte, 1=2-byte
+            logger.info("MeshCore: path hash size = %d-byte", self._path_hash_size)
+        except Exception:
+            pass
+
         self._mark_connected()
         logger.info(
             "MeshCore: connected, monitoring channels%s, DMs %s",
@@ -246,6 +255,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
             result = await self._mc.commands.send_device_query()
             if not result.is_error():
                 info["device"] = result.payload
+                # Extract path_hash_mode for convenience
+                phm = result.payload.get("path_hash_mode")
+                if phm is not None:
+                    info["path_hash_mode"] = phm
+                    info["path_hash_size"] = phm + 1  # 0=1-byte, 1=2-byte
         except Exception as e:
             info["device_error"] = str(e)
 
@@ -721,11 +735,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
             if metadata.get("path") is not None:
                 radio_parts.append(f"path={metadata['path']}")
             if radio_parts:
+                hash_bytes = self._path_hash_size
                 platform_context += (
                     "RADIO METADATA for this message: "
                     + ", ".join(radio_parts)
-                    + ". The path is the hex-encoded route the packet took "
-                    + "through the mesh (each byte = one hop hash). "
+                    + f". The path uses {hash_bytes}-byte hop hashes "
+                    + f"(each hop = {hash_bytes * 2} hex chars). "
                     + "You can use this data if asked about signal quality "
                     + "or mesh routing."
                 )
