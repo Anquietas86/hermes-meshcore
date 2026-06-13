@@ -27,19 +27,19 @@ Add to `~/.hermes/.env`:
 
 ```bash
 # Required
-MESHORE_HOST=192.168.0.141
-MESHORE_PORT=5000
+MESHCORE_HOST=192.168.0.141
+MESHCORE_PORT=5000
 
 # Recommended
-MESHORE_ADMIN_NODES=bba647077b2c     # Your node's pubkey prefix
-MESHORE_HOME_CHANNEL=dm:bba647077b2c # Where cron/notifications go
-MESHORE_MONITOR_CHANNELS=1           # Channels to respond in (empty = discover only)
-MESHORE_ENABLE_DMS=true
+MESHCORE_ADMIN_NODES=bba647077b2c     # Your node's pubkey prefix
+MESHCORE_HOME_CHANNEL=dm:bba647077b2c # Where cron/notifications go
+MESHCORE_MONITOR_CHANNELS=1           # Channels to respond in (empty = discover only)
+MESHCORE_ENABLE_DMS=true
 
 # Optional
-MESHORE_BOT_NAME=Jarvis
-MESHORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
-MESHORE_REQUIRE_MENTION=true         # Only respond to @Jarvis in channels
+MESHCORE_BOT_NAME=Jarvis
+MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
+MESHCORE_REQUIRE_MENTION=true         # Only respond to @Jarvis in channels
 ```
 
 Then enable in `~/.hermes/config.yaml`:
