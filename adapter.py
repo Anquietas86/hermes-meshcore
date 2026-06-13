@@ -102,6 +102,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._last_message_time: float = 0.0  # For silence watchdog
         self._watchdog_task: Optional[asyncio.Task] = None
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._poll_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -199,8 +200,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         )
         self._subscriptions.append(dm_sub)
 
-        # Start auto-fetching messages from the device
-        await self._mc.start_auto_message_fetching()
+        # Start manual message polling instead of auto-fetch.
+        # auto_message_fetching's internal event loop dies silently when
+        # send responses corrupt its state. Manual polling uses standalone
+        # get_msg() calls — each poll is independent, one failure doesn't
+        # kill the whole loop.
+        self._start_poll_loop()
 
         # Fetch path hash size for correct path interpretation
         try:
@@ -761,12 +766,37 @@ class MeshCoreAdapter(BasePlatformAdapter):
             self._watchdog_task = asyncio.create_task(self._silence_watchdog())
 
     def _stop_watchdogs(self) -> None:
-        """Cancel watchdog background tasks."""
-        for task in (self._keepalive_task, self._watchdog_task):
+        """Cancel watchdog and poll background tasks."""
+        for task in (self._keepalive_task, self._watchdog_task, self._poll_task):
             if task and not task.done():
                 task.cancel()
         self._keepalive_task = None
         self._watchdog_task = None
+        self._poll_task = None
+
+    # ── Manual message polling ─────────────────────────────────────────────
+
+    def _start_poll_loop(self) -> None:
+        """Start a manual polling loop that calls get_msg() every 2 seconds.
+
+        Each poll is a standalone command — one failure doesn't kill the loop.
+        This replaces start_auto_message_fetching() whose internal event loop
+        dies silently when send responses corrupt its state.
+        """
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = asyncio.create_task(self._poll_loop())
+
+    async def _poll_loop(self) -> None:
+        """Poll for new messages every 2 seconds."""
+        while self._mc is not None:
+            try:
+                # get_msg() returns None if no messages waiting, or a list
+                # of message dicts. The meshcore_py dispatcher routes them
+                # to our subscribed handlers.
+                await self._mc.commands.get_msg()
+            except Exception as e:
+                logger.debug("MeshCore: poll error (non-fatal): %s", e)
+            await asyncio.sleep(2.0)
 
     async def _handle_new_contact(self, event):
         """Handle a newly discovered contact."""
