@@ -87,6 +87,11 @@ PKT_CHANNEL_INFO = 0x12
 PKT_STATS = 0x18
 PKT_TELEMETRY_RESPONSE = 0x8B
 
+# Stats sub-types
+STATS_TYPE_CORE = 0x00
+STATS_TYPE_RADIO = 0x01
+STATS_TYPE_PACKETS = 0x02
+
 # Push notifications
 PKT_ACK = 0x82
 PKT_MESSAGES_WAITING = 0x83
@@ -519,6 +524,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._keepalive_task: Optional[asyncio.Task] = None
         self._last_message_time: float = 0.0
         self._watchdog_task: Optional[asyncio.Task] = None
+        self._stats_cache: Dict[str, Any] = {}
+        self._stats_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -602,9 +609,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._start_poll()
         self._start_keepalive()
         self._start_watchdog()
+        self._start_stats_refresh()
         return True
 
     async def disconnect(self) -> None:
+        self._stop_stats_refresh()
         self._stop_watchdog()
         self._stop_keepalive()
         self._stop_poll()
@@ -750,6 +759,27 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
             except Exception:
                 pass
+
+    # ── Stats refresh ─────────────────────────────────────────────────────
+
+    def _start_stats_refresh(self):
+        if self._stats_task is None or self._stats_task.done():
+            self._stats_task = asyncio.create_task(self._stats_refresh_loop())
+
+    def _stop_stats_refresh(self):
+        if self._stats_task and not self._stats_task.done():
+            self._stats_task.cancel()
+        self._stats_task = None
+
+    async def _stats_refresh_loop(self):
+        """Refresh stats cache every 5 minutes."""
+        await asyncio.sleep(10)  # initial delay — let connection settle
+        while self._conn and self._conn.is_connected:
+            try:
+                self._stats_cache = await self.get_stats()
+            except Exception:
+                pass
+            await asyncio.sleep(300)
 
     # ── Watchdog ──────────────────────────────────────────────────────────
 
@@ -1024,6 +1054,21 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     parts.append(f"{label}={metadata[key]}")
             if parts:
                 platform_context += "RADIO: " + ", ".join(parts) + ". "
+
+        # Inject cached node stats so model can answer mesh health questions
+        if self._stats_cache:
+            core = self._stats_cache.get("core", {})
+            radio = self._stats_cache.get("radio", {})
+            pkts = self._stats_cache.get("packets", {})
+            stats_parts = []
+            if core:
+                stats_parts.append(f"battery={core.get('battery_mv','?')}mV uptime={core.get('uptime_secs','?')}s errors={core.get('errors','?')}")
+            if radio:
+                stats_parts.append(f"noise={radio.get('noise_floor','?')}dBm lastRSSI={radio.get('last_rssi','?')} lastSNR={radio.get('last_snr','?')}dB")
+            if pkts:
+                stats_parts.append(f"pkts(recv={pkts.get('recv','?')} sent={pkts.get('sent','?')} flood={pkts.get('flood_tx','?')}/{pkts.get('flood_rx','?')} direct={pkts.get('direct_tx','?')}/{pkts.get('direct_rx','?')} errs={pkts.get('recv_errors','?')})")
+            if stats_parts:
+                platform_context += "NODE: " + "; ".join(stats_parts) + ". "
 
         event = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=source,
