@@ -94,12 +94,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
         }
 
         # Runtime state
-        self._mc = None  # MeshCore client instance (receive-only, may go stale)
+        self._mc = None  # MeshCore client instance
         self._subscriptions: list = []
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
         self._path_hash_size: int = 1  # Default 1-byte, updated on connect
-        self._poll_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -197,9 +196,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         )
         self._subscriptions.append(dm_sub)
 
-        # Start polling loop — opens a fresh connection every 15s to fetch
-        # messages, because the main connection's auto-fetch dies silently.
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        # Start auto-fetching messages from the device
+        await self._mc.start_auto_message_fetching()
 
         # Fetch path hash size for correct path interpretation
         try:
@@ -219,11 +217,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from the MeshCore node."""
-        # Cancel poll loop
-        if self._poll_task:
-            self._poll_task.cancel()
-            self._poll_task = None
-
         self._mark_disconnected()
 
         if self._mc:
@@ -235,6 +228,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
             self._subscriptions.clear()
 
             try:
+                await self._mc.stop_auto_message_fetching()
+            except Exception:
+                pass
+
+            try:
                 await self._mc.disconnect()
             except Exception:
                 pass
@@ -243,36 +241,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self._contacts.clear()
         self._discovered_channels.clear()
-
-    async def _poll_loop(self) -> None:
-        """Reconnect the main connection every 60s. The node's TCP stack
-        goes stale after ~60s under load, but a fresh connection always
-        works. This keeps both send and receive healthy."""
-        while True:
-            await asyncio.sleep(60)
-            if not self._mc:
-                return
-            try:
-                logger.info("MeshCore: periodic reconnect...")
-                # Disconnect old connection
-                for sub in self._subscriptions:
-                    try:
-                        self._mc.unsubscribe(sub)
-                    except Exception:
-                        pass
-                self._subscriptions.clear()
-                try:
-                    await self._mc.disconnect()
-                except Exception:
-                    pass
-                self._mc = None
-
-                # Reconnect fresh
-                await self.connect()
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.warning("MeshCore: periodic reconnect failed: %s", e)
 
     # ── Node management (admin-only runtime operations) ───────────────────
 
@@ -458,99 +426,78 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         Messages longer than 150 chars are split into multiple packets
         at word boundaries and sent sequentially with a short delay.
-
-        Opens a fresh TCP connection for each send because the node's
-        command channel goes stale under load. The main _mc connection
-        stays alive for receiving (auto-fetch loop).
         """
         if not self._mc:
             return SendResult(success=False, error="Not connected")
 
-        # Open a fresh send-only connection
-        from meshcore import MeshCore as MC
-        send_mc = None
-        try:
-            send_mc = await MC.create_tcp(self.host, self.port)
-        except Exception as e:
-            logger.warning("MeshCore: send reconnect failed: %s", e)
-            return SendResult(success=False, error=f"Send reconnect failed: {e}")
+        # Split into 150-char chunks at word boundaries
+        raw_chunks = self._split_for_mesh(content, max_len=150)
 
-        try:
-            # Split into 150-char chunks at word boundaries
-            raw_chunks = self._split_for_mesh(content, max_len=150)
+        # Add chunk markers for multi-packet messages so the receiver
+        # knows they're part of a sequence and nothing is missing.
+        # Split directly at marker-aware size in ONE pass — no re-splitting.
+        # Reserve 13 chars for " ..." + " (99/99)" (worst-case suffix/marker).
+        if len(raw_chunks) > 1:
+            # Re-split the full text at 137 chars (150 - 13) so every chunk
+            # fits its marker without a second pass.
+            marker_aware = self._split_for_mesh(content, max_len=137)
+            total = len(marker_aware)
+            chunks = []
+            for i, chunk in enumerate(marker_aware):
+                suffix = " ..." if i < total - 1 else ""
+                marker = f" ({i+1}/{total})"
+                chunks.append(chunk + suffix + marker)
+        else:
+            chunks = raw_chunks
 
-            # Add chunk markers for multi-packet messages
-            if len(raw_chunks) > 1:
-                marker_aware = self._split_for_mesh(content, max_len=137)
-                total = len(marker_aware)
-                chunks = []
-                for i, chunk in enumerate(marker_aware):
-                    suffix = " ..." if i < total - 1 else ""
-                    marker = f" ({i+1}/{total})"
-                    chunks.append(chunk + suffix + marker)
-            else:
-                chunks = raw_chunks
+        message_ids = []
+        errors = []
 
-            message_ids = []
-            errors = []
+        for i, chunk in enumerate(chunks):
+            try:
+                if chat_id.startswith("channel:"):
+                    channel_idx = int(chat_id.split(":", 1)[1])
+                    # send_chan_msg has no built-in retry — add our own
+                    result = None
+                    for attempt in range(3):
+                        result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                        if not result.is_error():
+                            break
+                        logger.debug("MeshCore: chan send attempt %d failed: %s", attempt + 1, result.payload)
+                        await asyncio.sleep(1.0)
+                elif chat_id.startswith("dm:"):
+                    pubkey_prefix = chat_id.split(":", 1)[1]
+                    contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
+                    if contact is None:
+                        return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
+                    result = await self._mc.commands.send_msg_with_retry(
+                        contact, chunk, max_attempts=3
+                    )
+                else:
+                    return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-            for i, chunk in enumerate(chunks):
-                try:
-                    if chat_id.startswith("channel:"):
-                        channel_idx = int(chat_id.split(":", 1)[1])
-                        result = None
-                        for attempt in range(3):
-                            result = await send_mc.commands.send_chan_msg(channel_idx, chunk)
-                            if result is not None and not result.is_error():
-                                break
-                            logger.debug("MeshCore: chan send attempt %d failed: %s",
-                                         attempt + 1,
-                                         result.payload if result else "None")
-                            await asyncio.sleep(1.0)
-                    elif chat_id.startswith("dm:"):
-                        pubkey_prefix = chat_id.split(":", 1)[1]
-                        # Look up contact from main connection's cache
-                        contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
-                        if contact is None:
-                            return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
-                        # Send via fresh connection
-                        result = await send_mc.commands.send_msg_with_retry(
-                            contact, chunk, max_attempts=3
-                        )
-                    else:
-                        return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
+                if result.is_error():
+                    errors.append(f"chunk {i+1}: {result.payload}")
+                else:
+                    message_ids.append(str(int(time.time() * 1000)))
 
-                    if result is None:
-                        errors.append(f"chunk {i+1}: send_chan_msg returned None (node busy)")
-                    elif result.is_error():
-                        errors.append(f"chunk {i+1}: {result.payload}")
-                    else:
-                        message_ids.append(str(int(time.time() * 1000)))
+                # Small delay between chunks to avoid flooding the mesh
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.5)
 
-                    if i < len(chunks) - 1:
-                        await asyncio.sleep(0.5)
+            except Exception as e:
+                errors.append(f"chunk {i+1}: {e}")
 
-                except Exception as e:
-                    errors.append(f"chunk {i+1}: {e}")
-
-            if errors and not message_ids:
-                logger.warning("MeshCore: all %d chunks failed: %s",
-                               len(chunks), "; ".join(errors))
-                return SendResult(success=False, error="; ".join(errors))
-            if errors:
-                logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
-                               len(message_ids), len(chunks), errors)
-            return SendResult(
-                success=True,
-                message_id=message_ids[0] if message_ids else "",
-                continuation_message_ids=tuple(message_ids[1:]) if len(message_ids) > 1 else (),
-            )
-        finally:
-            if send_mc:
-                try:
-                    await send_mc.disconnect()
-                except Exception:
-                    pass
+        if errors and not message_ids:
+            return SendResult(success=False, error="; ".join(errors))
+        if errors:
+            logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
+                           len(message_ids), len(chunks), errors)
+        return SendResult(
+            success=True,
+            message_id=message_ids[0] if message_ids else "",
+            continuation_message_ids=tuple(message_ids[1:]) if len(message_ids) > 1 else (),
+        )
 
     @staticmethod
     def _split_for_mesh(text: str, max_len: int = 150) -> list[str]:
