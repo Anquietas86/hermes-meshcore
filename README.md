@@ -43,8 +43,18 @@ MESHCORE_ENABLE_DMS=true
 
 # Optional
 MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
-MESHCORE_REQUIRE_MENTION=true         # Only respond to @mention in channels
+MESHCORE_REQUIRE_MENTION=0,2,3        # Channels requiring @mention (empty = none, "true" = all)
 ```
+
+### Per-channel @mention gating
+
+`MESHCORE_REQUIRE_MENTION` accepts three formats:
+
+| Value | Behavior |
+|-------|----------|
+| `true` / `1` / `yes` | All monitored channels require @mention |
+| `0,2,3` | Only channels 0, 2, 3 require @mention (channel 1 is free-for-all) |
+| *(empty)* | No channels require @mention — respond to everything |
 
 The bot name for @mention detection is auto-derived from your node's advert
 name (set via `hermes meshcore set-name "MyBot"`). `MESHCORE_BOT_NAME` is
