@@ -750,15 +750,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._keepalive_task = None
 
     async def _keepalive_loop(self):
-        """get_bat() every 30s — keeps TCP pipe alive."""
+        """get_bat() every 15s — keeps TCP pipe alive (node has ~120s idle timeout)."""
         while self._conn and self._conn.is_connected:
-            await asyncio.sleep(30)
+            await asyncio.sleep(15)
             if not self._conn or not self._conn.is_connected:
                 return
             try:
                 await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("MeshCore: keepalive failed: %s", e)
 
     # ── Watchdog ──────────────────────────────────────────────────────────
 
