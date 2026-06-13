@@ -538,9 +538,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     errors.append(f"chunk {i+1}: {e}")
 
             if errors and not message_ids:
-                logger.warning("MeshCore: all %d chunks failed — disconnecting to trigger reconnect",
-                               len(chunks))
-                asyncio.create_task(self.disconnect())
+                logger.warning("MeshCore: all %d chunks failed: %s",
+                               len(chunks), "; ".join(errors))
                 return SendResult(success=False, error="; ".join(errors))
             if errors:
                 logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
