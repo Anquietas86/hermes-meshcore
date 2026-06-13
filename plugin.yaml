@@ -1,0 +1,56 @@
+name: meshcore-platform
+label: MeshCore
+kind: platform
+version: 1.0.0
+description: >
+  MeshCore gateway adapter for Hermes Agent.
+  Connects to a MeshCore companion radio node via TCP and relays
+  channel messages and DMs to the Hermes agent. Uses the meshcore_py
+  library for the MeshCore protocol.
+author: Nous Research
+requires_env:
+  - name: MESHORE_HOST
+    description: "MeshCore node TCP hostname (e.g. mchome)"
+    prompt: "MeshCore host"
+    password: false
+  - name: MESHORE_PORT
+    description: "MeshCore node TCP port (default: 5000)"
+    prompt: "MeshCore port"
+    password: false
+optional_env:
+  - name: MESHORE_BOT_NAME
+    description: "Name the bot uses when replying (default: Jarvis)"
+    prompt: "Bot display name"
+    password: false
+  - name: MESHORE_ADMIN_NODES
+    description: "Comma-separated pubkey prefixes for admin access (full tools, sensitive info)"
+    prompt: "Admin node pubkey prefixes"
+    password: false
+  - name: MESHORE_ADMIN_CHANNELS
+    description: "Comma-separated channel indexes trusted for admin-level replies (empty = no channels trusted)"
+    prompt: "Admin channel indexes"
+    password: false
+  - name: MESHORE_MONITOR_CHANNELS
+    description: "Comma-separated channel indexes to monitor (empty = discover all, respond to none until enabled)"
+    prompt: "Channel indexes to monitor"
+    password: false
+  - name: MESHORE_ENABLE_DMS
+    description: "Respond to direct messages (true/false, default: true)"
+    prompt: "Enable DMs?"
+    password: false
+  - name: MESHORE_ALLOWED_USERS
+    description: "Comma-separated pubkey prefixes allowed to talk to the bot (empty = allow all)"
+    prompt: "Allowed pubkey prefixes"
+    password: false
+  - name: MESHORE_ALLOW_ALL_USERS
+    description: "Allow anyone to talk to the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: MESHORE_HOME_CHANNEL
+    description: "Channel index for cron / notification delivery"
+    prompt: "Home channel index"
+    password: false
+  - name: MESHORE_REQUIRE_MENTION
+    description: "In channels, require @bot-name mention to respond (true/false, default: true)"
+    prompt: "Require @mention in channels?"
+    password: false

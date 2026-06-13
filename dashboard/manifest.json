@@ -1,0 +1,14 @@
+{
+  "name": "meshcore-platform",
+  "version": "1.0.0",
+  "description": "MeshCore LoRa mesh radio platform adapter for Hermes Agent",
+  "author": "Nous Research",
+  "tab": {
+    "path": "/meshcore",
+    "position": "end"
+  },
+  "slots": [],
+  "api": null,
+  "js_bundle": null,
+  "css_bundle": null
+}
