@@ -252,10 +252,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._discovered_channels.clear()
 
     async def _health_check_loop(self) -> None:
-        """Ping the node every 60s. If it stops responding, disconnect so
-        the gateway's auto-reconnect mechanism kicks in."""
+        """Ping the node every 30s. Single failure triggers disconnect so
+        the gateway's auto-reconnect kicks in quickly."""
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
             if not self._mc:
                 return
             try:
@@ -495,13 +495,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
             try:
                 if chat_id.startswith("channel:"):
                     channel_idx = int(chat_id.split(":", 1)[1])
-                    # send_chan_msg has no built-in retry — add our own
+                    # send_chan_msg has no built-in retry — add our own.
+                    # It can also return None when the node is busy, so
+                    # treat None as a transient failure and retry.
                     result = None
                     for attempt in range(3):
                         result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
-                        if not result.is_error():
+                        if result is not None and not result.is_error():
                             break
-                        logger.debug("MeshCore: chan send attempt %d failed: %s", attempt + 1, result.payload)
+                        logger.debug("MeshCore: chan send attempt %d failed: %s",
+                                     attempt + 1,
+                                     result.payload if result else "None")
                         await asyncio.sleep(1.0)
                 elif chat_id.startswith("dm:"):
                     pubkey_prefix = chat_id.split(":", 1)[1]
@@ -514,7 +518,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-                if result.is_error():
+                if result is None:
+                    errors.append(f"chunk {i+1}: send_chan_msg returned None (node busy)")
+                elif result.is_error():
                     errors.append(f"chunk {i+1}: {result.payload}")
                 else:
                     message_ids.append(str(int(time.time() * 1000)))
@@ -527,6 +533,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 errors.append(f"chunk {i+1}: {e}")
 
         if errors and not message_ids:
+            # All chunks failed — connection is likely stale, trigger reconnect
+            logger.warning("MeshCore: all %d chunks failed — disconnecting to trigger reconnect",
+                           len(chunks))
+            asyncio.create_task(self.disconnect())
             return SendResult(success=False, error="; ".join(errors))
         if errors:
             logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
