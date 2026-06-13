@@ -74,15 +74,6 @@ Restart the gateway:
 hermes gateway restart
 ```
 
-## Important
-
-Set `approvals.mode: off` in config.yaml — MeshCore's 150-char limit
-can't carry approval prompts.
-
-```bash
-hermes config set approvals.mode off
-```
-
 ## Requirements
 
 - Hermes Agent (latest)
