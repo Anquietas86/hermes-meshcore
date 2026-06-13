@@ -457,13 +457,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
             try:
                 if chat_id.startswith("channel:"):
                     channel_idx = int(chat_id.split(":", 1)[1])
-                    # send_chan_msg has no built-in retry — add our own
+                    # send_chan_msg has no built-in retry — add our own.
+                    # It can return None when the node is busy, so treat
+                    # None as a transient failure and retry.
                     result = None
                     for attempt in range(3):
                         result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
-                        if not result.is_error():
+                        if result is not None and not result.is_error():
                             break
-                        logger.debug("MeshCore: chan send attempt %d failed: %s", attempt + 1, result.payload)
+                        logger.debug("MeshCore: chan send attempt %d failed: %s",
+                                     attempt + 1,
+                                     result.payload if result else "None")
                         await asyncio.sleep(1.0)
                 elif chat_id.startswith("dm:"):
                     pubkey_prefix = chat_id.split(":", 1)[1]
