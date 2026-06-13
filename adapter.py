@@ -439,7 +439,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
             try:
                 if chat_id.startswith("channel:"):
                     channel_idx = int(chat_id.split(":", 1)[1])
-                    result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                    # send_chan_msg has no built-in retry — add our own
+                    result = None
+                    for attempt in range(3):
+                        result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                        if not result.is_error():
+                            break
+                        logger.debug("MeshCore: chan send attempt %d failed: %s", attempt + 1, result.payload)
+                        await asyncio.sleep(1.0)
                 elif chat_id.startswith("dm:"):
                     pubkey_prefix = chat_id.split(":", 1)[1]
                     contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
