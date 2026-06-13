@@ -395,13 +395,19 @@ class MeshCoreRawConnection:
     def parse_channel_info(payload: bytes) -> dict:
         """Parse CHANNEL_INFO (0x12) response.
 
-        Format: 1-byte channel_idx + 32-byte name (null-padded) + 16-byte secret.
+        Format: 1-byte channel_idx + null-terminated name (max 32 bytes)
+        + 16-byte channel secret.
         """
         buf = io.BytesIO(payload)
         info = {"channel_idx": buf.read(1)[0]}
-        # Read exactly 32 bytes for the name, strip nulls
-        name_bytes = buf.read(32)
-        info["channel_name"] = name_bytes.decode("utf-8", "ignore").replace("\x00", "")
+        # Read name until null byte (max 32 bytes)
+        name_bytes = b""
+        for _ in range(32):
+            b = buf.read(1)
+            if not b or b == b"\x00":
+                break
+            name_bytes += b
+        info["channel_name"] = name_bytes.decode("utf-8", "ignore")
         return info
 
     @staticmethod
@@ -765,12 +771,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     return SendResult(success=False, error=f"Invalid chat_id: {chat_id}")
 
-                if result is None:
-                    errors.append(f"chunk {i+1}: send failed")
+                if result is True:
+                    message_ids.append(str(int(time.time() * 1000)))
                 elif isinstance(result, str):
                     errors.append(f"chunk {i+1}: {result}")
                 else:
-                    message_ids.append(str(int(time.time() * 1000)))
+                    errors.append(f"chunk {i+1}: send failed")
                 if i < len(chunks) - 1:
                     await asyncio.sleep(0.5)
             except Exception as e:
@@ -784,8 +790,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             continuation_message_ids=tuple(message_ids[1:]) if len(message_ids) > 1 else (),
         )
 
-    async def _send_channel_msg(self, channel_idx: int, text: str) -> Optional[str]:
-        """Send a channel message. Returns None on success, error string on failure."""
+    async def _send_channel_msg(self, channel_idx: int, text: str):
+        """Send a channel message. Returns True on success, error string on failure."""
         timestamp = int(time.time())
         cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
               timestamp.to_bytes(4, "little") + text.encode("utf-8")
@@ -794,14 +800,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 pkt_type, payload = await self._conn.send_command(
                     cmd, [PKT_OK, PKT_ERROR], timeout=10.0)
                 if pkt_type == PKT_OK:
-                    return None
+                    return True
             except Exception:
                 pass
             await asyncio.sleep(1.0)
         return "no_event_received"
 
-    async def _send_dm(self, pubkey_prefix: str, text: str) -> Optional[str]:
-        """Send a DM with retry and ACK waiting. Returns None on success."""
+    async def _send_dm(self, pubkey_prefix: str, text: str):
+        """Send a DM. Returns True on MSG_SENT (node accepted), error string on failure.
+
+        Does NOT wait for over-the-air ACK — that can take 30+ seconds on LoRa
+        and would block the command lock, preventing message reception.
+        Fire-and-forget, same as meshcore_py's send_msg().
+        """
         contact = self._contacts.get(pubkey_prefix)
         if contact is None:
             prefix_lower = pubkey_prefix.lower()
@@ -814,32 +825,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         dst_bytes = bytes.fromhex(contact["public_key"])[:6]
         timestamp = int(time.time())
-        flood = contact.get("out_path_len") == -1
-        max_attempts = 3
-        flood_attempts = 0
 
-        for attempt in range(max_attempts):
-            if attempt == 2 and not flood:
-                try:
-                    await self._conn.send_command(
-                        b"\x0D" + bytes.fromhex(contact["public_key"])[:32],
-                        [PKT_OK, PKT_ERROR], timeout=5.0)
-                    flood = True
-                except Exception:
-                    pass
-
+        for attempt in range(3):
             cmd = bytes([CMD_SEND_TXT_MSG, 0x00, attempt]) + \
                   timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
             try:
-                pkt_type, payload = await self._conn.send_and_wait_ack(cmd, timeout=15.0)
-                if pkt_type == PKT_OK:
-                    return None
-                if flood:
-                    flood_attempts += 1
+                pkt_type, payload = await self._conn.send_command(
+                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                if pkt_type == PKT_MSG_SENT:
+                    return True
             except Exception:
-                if flood:
-                    flood_attempts += 1
-        return "no_ack_received"
+                pass
+            await asyncio.sleep(1.0)
+        return "no_event_received"
 
     @staticmethod
     def _split_for_mesh(text: str, max_len: int = 150) -> list:
