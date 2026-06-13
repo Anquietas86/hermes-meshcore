@@ -849,9 +849,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._conn or not self._conn.is_connected:
             return SendResult(success=False, error="Not connected")
 
-        raw_chunks = self._split_for_mesh(content, max_len=150)
+        # Different limits: DMs = 150, channels = 135
+        is_channel = chat_id.startswith("channel:")
+        max_len = 135 if is_channel else 150
+        marker_len = max_len - 13  # reserve 13 chars for " ... (N/M)"
+
+        raw_chunks = self._split_for_mesh(content, max_len=max_len)
         if len(raw_chunks) > 1:
-            marker_aware = self._split_for_mesh(content, max_len=137)
+            marker_aware = self._split_for_mesh(content, max_len=marker_len)
             total = len(marker_aware)
             chunks = [c + (" ..." if i < total - 1 else "") + f" ({i+1}/{total})"
                       for i, c in enumerate(marker_aware)]
@@ -1068,8 +1073,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         elif chat_type == "dm":
             security_note = "Admin DM. " if is_admin else "Non-admin DM — be cautious. "
 
+        # Different limits: DMs = 150 chars, channels = 135 chars
+        char_limit = 135 if chat_type == "group" else 150
         platform_context = (
-            "PLATFORM CONTEXT — MeshCore LoRa mesh: 150 char packets, "
+            f"PLATFORM CONTEXT — MeshCore LoRa mesh: {char_limit} char packets, "
             "auto-split for longer responses. Plain text only, no markdown. "
             + security_note
         )
@@ -1308,7 +1315,7 @@ def register(ctx):
         allow_all_env="MESHCORE_ALLOW_ALL_USERS",
         max_message_length=400, emoji="📡", pii_safe=True, allow_update_command=True,
         platform_hint=(
-            "MeshCore LoRa mesh: 150 char packets, auto-split for longer. "
+            "MeshCore LoRa mesh: 150 char DMs, 135 char channels, auto-split for longer. "
             "Plain text only. Admin nodes get full access; public users restricted. "
             "Never share credentials or sensitive data in public channels."
         ),
