@@ -750,15 +750,22 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._keepalive_task = None
 
     async def _keepalive_loop(self):
-        """get_bat() every 15s — keeps TCP pipe alive (node has ~120s idle timeout)."""
+        """get_bat() every 15s — keeps TCP pipe alive. Triggers reconnect on failure."""
+        failures = 0
         while self._conn and self._conn.is_connected:
             await asyncio.sleep(15)
             if not self._conn or not self._conn.is_connected:
                 return
             try:
                 await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
+                failures = 0
             except Exception as e:
-                logger.warning("MeshCore: keepalive failed: %s", e)
+                failures += 1
+                logger.warning("MeshCore: keepalive failed (%d): %s", failures, e)
+                if failures >= 2:
+                    logger.warning("MeshCore: keepalive — reconnecting after %d failures", failures)
+                    await self._reconnect()
+                    return
 
     # ── Watchdog ──────────────────────────────────────────────────────────
 
@@ -780,20 +787,26 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return
             if time.time() - self._last_message_time > 120 and self._last_message_time > 0:
                 logger.warning("MeshCore: watchdog — reconnecting")
-                self._stop_keepalive()
-                self._stop_poll()
-                self._mark_disconnected()
-                try:
-                    await self._conn.disconnect()
-                except Exception:
-                    pass
-                self._conn = None
-                self._contacts.clear()
-                try:
-                    await self.connect()
-                except Exception as e:
-                    logger.error("MeshCore: watchdog reconnect error: %s", e)
+                await self._reconnect()
                 return
+
+    async def _reconnect(self):
+        """Tear down and reconnect. Used by keepalive and watchdog."""
+        self._stop_keepalive()
+        self._stop_poll()
+        self._stop_stats_refresh()
+        self._mark_disconnected()
+        if self._conn:
+            try:
+                await self._conn.disconnect()
+            except Exception:
+                pass
+            self._conn = None
+        self._contacts.clear()
+        try:
+            await self.connect()
+        except Exception as e:
+            logger.error("MeshCore: reconnect error: %s", e)
 
     # ── Stats refresh ──────────────────────────────────────────────────────
 
