@@ -486,8 +486,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
         enable_dms = os.getenv("MESHCORE_ENABLE_DMS") or extra.get("enable_dms", "true")
         self.enable_dms = enable_dms.lower() in {"1", "true", "yes"}
 
-        require_mention = os.getenv("MESHCORE_REQUIRE_MENTION") or extra.get("require_mention", "true")
-        self.require_mention = require_mention.lower() in {"1", "true", "yes"}
+        require_mention_raw = os.getenv("MESHCORE_REQUIRE_MENTION") or extra.get("require_mention", "")
+        # Per-channel: comma-separated channel indexes that require @mention.
+        # Empty = all channels free-for-all. "true"/"1" = all channels require mention (legacy).
+        if require_mention_raw.lower() in {"true", "1", "yes"}:
+            self.require_mention_channels: Optional[Set[int]] = None  # None = all channels
+        elif require_mention_raw.strip():
+            self.require_mention_channels = {int(c.strip()) for c in require_mention_raw.split(",") if c.strip().lstrip("-").isdigit()}
+        else:
+            self.require_mention_channels = set()  # empty set = no channels require mention
 
         admin_channels_raw = os.getenv("MESHCORE_ADMIN_CHANNELS") or extra.get("admin_channels", "")
         self.admin_channels: Set[int] = {int(c.strip()) for c in admin_channels_raw.split(",") if c.strip().isdigit()}
@@ -919,7 +926,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
             sender_name = sender_name.strip()
             user_prompt = user_prompt.strip()
 
-        if self.require_mention:
+        # Per-channel mention gating: None = all channels, set() = none, {1,3} = specific
+        mention_required = (self.require_mention_channels is None or
+                            channel_idx in self.require_mention_channels)
+        if mention_required:
             # MeshCore app sends mentions as @[Full Node Name] (bracketed)
             # Also match plain @name and name: prefixes
             node_name = self._self_info.get("name", "") if self._self_info else ""
