@@ -198,13 +198,19 @@ class MeshCoreRawConnection:
         """
         async with self._cmd_lock:
             await self.send_frame(cmd_bytes)
+            logger.debug("MeshCore(raw): send_command sent %s, waiting for %s",
+                         cmd_bytes.hex()[:20], [hex(t) for t in expected_types])
             deadline = time.time() + timeout
             while time.time() < deadline:
                 pkt_type, payload = await self.read_frame()
+                logger.debug("MeshCore(raw): send_command recv type=0x%02x payload=%s",
+                             pkt_type, payload[:20].hex())
                 if pkt_type in expected_types:
+                    logger.debug("MeshCore(raw): send_command MATCH type=0x%02x", pkt_type)
                     return pkt_type, payload
                 # Unsolicited message (e.g. push notification) — handle it
                 await self._handle_unsolicited(pkt_type, payload)
+            logger.warning("MeshCore(raw): send_command TIMEOUT after %.1fs", timeout)
             return PKT_ERROR, b"\x01"  # timeout → generic error
 
     async def send_and_wait_ack(self, cmd_bytes: bytes,
@@ -793,16 +799,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def _send_channel_msg(self, channel_idx: int, text: str):
         """Send a channel message. Returns True on success, error string on failure."""
         timestamp = int(time.time())
-        cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
-              timestamp.to_bytes(4, "little") + text.encode("utf-8")
         for attempt in range(3):
+            cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
+                  timestamp.to_bytes(4, "little") + text.encode("utf-8")
+            logger.debug("MeshCore: _send_channel_msg attempt=%d cmd=%s", attempt, cmd.hex()[:30])
             try:
                 pkt_type, payload = await self._conn.send_command(
                     cmd, [PKT_OK, PKT_ERROR], timeout=10.0)
+                logger.debug("MeshCore: _send_channel_msg result type=0x%02x payload=%s",
+                             pkt_type, payload[:20].hex() if payload else "empty")
                 if pkt_type == PKT_OK:
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("MeshCore: _send_channel_msg exception: %s", e)
             await asyncio.sleep(1.0)
         return "no_event_received"
 
@@ -829,13 +838,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
         for attempt in range(3):
             cmd = bytes([CMD_SEND_TXT_MSG, 0x00, attempt]) + \
                   timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
+            logger.debug("MeshCore: _send_dm attempt=%d cmd=%s", attempt, cmd.hex()[:30])
             try:
                 pkt_type, payload = await self._conn.send_command(
                     cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                logger.debug("MeshCore: _send_dm result type=0x%02x payload=%s",
+                             pkt_type, payload[:20].hex() if payload else "empty")
                 if pkt_type == PKT_MSG_SENT:
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("MeshCore: _send_dm exception: %s", e)
             await asyncio.sleep(1.0)
         return "no_event_received"
 
