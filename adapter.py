@@ -1,33 +1,35 @@
 """
-MeshCore Platform Adapter for Hermes Agent.
+MeshCore Platform Adapter for Hermes Agent — RAW BINARY PROTOCOL.
 
-A plugin-based gateway adapter that connects to a MeshCore companion radio
-node via TCP and relays channel messages and DMs to the Hermes agent.
-Uses the ``meshcore_py`` library for the MeshCore protocol.
+Talks the MeshCore companion binary protocol directly over TCP.
+No meshcore_py dependency. Handles TCP framing, command dispatch,
+response parsing, and message routing internally.
 
-Configuration via environment variables (or config.yaml extra)::
+Protocol reference:
+  Send frame: 0x3C + 2-byte LE size + payload
+  Recv frame: 0x3E + 2-byte LE size + payload
+  Commands: single-byte opcode + args (see packets.py CommandType)
+  Responses: single-byte type + payload (see packets.py PacketType)
 
-    MESHCORE_HOST=mchome
+Configuration via environment variables::
+
+    MESHCORE_HOST=192.168.0.141
     MESHCORE_PORT=5000
     MESHCORE_BOT_NAME=Jarvis
-    MESHCORE_ADMIN_NODES=abc123,def456
-    MESHCORE_MONITOR_CHANNELS=1,3,5   (empty = discover all, respond to none)
+    MESHCORE_ADMIN_NODES=bba647077b2c
+    MESHCORE_MONITOR_CHANNELS=1
     MESHCORE_ENABLE_DMS=true
-    MESHCORE_REQUIRE_MENTION=true
-    MESHCORE_ALLOWED_USERS=            (empty = allow all)
 """
 
 import asyncio
+import io
 import logging
 import os
+import struct
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Lazy imports — meshcore_py may not be installed yet
-# ---------------------------------------------------------------------------
 
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -37,68 +39,405 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 
-# meshcore_py is imported at connect time so the plugin is importable
-# even before the library is installed.
+
+# ── Protocol constants ────────────────────────────────────────────────────
+
+# TCP framing
+FRAME_SEND_MARKER = 0x3C
+FRAME_RECV_MARKER = 0x3E
+MAX_FRAME_SIZE = 300
+
+# Command opcodes
+CMD_APP_START = 0x01
+CMD_SEND_TXT_MSG = 0x02
+CMD_SEND_CHANNEL_TXT_MSG = 0x03
+CMD_GET_CONTACTS = 0x04
+CMD_SYNC_NEXT_MESSAGE = 0x0A
+CMD_SEND_SELF_ADVERT = 0x07
+CMD_DEVICE_QUERY = 0x16
+CMD_GET_BATT = 0x14
+CMD_GET_CHANNEL = 0x1F
+CMD_SET_CHANNEL = 0x20
+CMD_SET_RADIO = 0x0B
+CMD_SET_TX_POWER = 0x0C
+CMD_SET_NAME = 0x08
+CMD_REBOOT = 0x13
+CMD_GET_STATS = 0x38
+CMD_RESET_PATH = 0x0D
+CMD_GET_SELF_TELEMETRY = 0x27
+CMD_SET_OTHER_PARAMS = 0x26
+
+# Response packet types
+PKT_OK = 0x00
+PKT_ERROR = 0x01
+PKT_CONTACT_START = 0x02
+PKT_CONTACT = 0x03
+PKT_CONTACT_END = 0x04
+PKT_SELF_INFO = 0x05
+PKT_MSG_SENT = 0x06
+PKT_CONTACT_MSG_RECV = 0x07
+PKT_CHANNEL_MSG_RECV = 0x08
+PKT_CURRENT_TIME = 0x09
+PKT_NO_MORE_MSGS = 0x0A
+PKT_BATTERY = 0x0C
+PKT_DEVICE_INFO = 0x0D
+PKT_CONTACT_MSG_RECV_V3 = 0x10
+PKT_CHANNEL_MSG_RECV_V3 = 0x11
+PKT_CHANNEL_INFO = 0x12
+PKT_STATS = 0x18
+PKT_TELEMETRY_RESPONSE = 0x8B
+
+# Push notifications
+PKT_ACK = 0x82
+PKT_MESSAGES_WAITING = 0x83
+PKT_ADVERTISEMENT = 0x80
+PKT_NEW_ADVERT = 0x8A
+
+# Error codes
+ERROR_CODES = {
+    1: "generic_error", 2: "invalid_command", 3: "not_implemented",
+    4: "invalid_params", 5: "busy", 6: "no_contact", 7: "no_channel",
+    8: "buffer_full", 9: "msg_too_long", 10: "no_key",
+}
 
 
-# ---------------------------------------------------------------------------
-# MeshCore Adapter
-# ---------------------------------------------------------------------------
+# ── Raw TCP Connection ────────────────────────────────────────────────────
+
+class MeshCoreRawConnection:
+    """Raw binary protocol connection to a MeshCore node over TCP.
+
+    Handles framing, send, receive, and response parsing.
+    No meshcore_py dependency.
+    """
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
+        self._cmd_lock = asyncio.Lock()
+        self._recv_buffer = b""
+
+    async def connect(self) -> None:
+        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        logger.info("MeshCore(raw): connected to %s:%s", self.host, self.port)
+
+    async def disconnect(self) -> None:
+        if self.writer:
+            self.writer.close()
+            try:
+                await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
+            except Exception:
+                pass
+        self.reader = None
+        self.writer = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self.writer is not None
+
+    # ── Frame I/O ────────────────────────────────────────────────────────
+
+    async def _read_exactly(self, n: int) -> bytes:
+        """Read exactly n bytes from the stream."""
+        data = b""
+        while len(data) < n:
+            chunk = await asyncio.wait_for(self.reader.read(n - len(data)), timeout=15.0)
+            if not chunk:
+                raise ConnectionError("TCP connection closed")
+            data += chunk
+        return data
+
+    async def read_frame(self) -> Tuple[int, bytes]:
+        """Read one frame: returns (packet_type, payload_bytes).
+
+        Frame format: 0x3E + 2-byte LE size + payload
+        """
+        while True:
+            # Find frame marker
+            while True:
+                b = await self._read_exactly(1)
+                if b[0] == FRAME_RECV_MARKER:
+                    break
+                logger.debug("MeshCore(raw): skipping junk byte 0x%02x", b[0])
+
+            # Read size (2 bytes LE)
+            size_bytes = await self._read_exactly(2)
+            size = int.from_bytes(size_bytes, "little")
+
+            if size > MAX_FRAME_SIZE:
+                logger.warning("MeshCore(raw): invalid frame size %d, skipping", size)
+                continue
+
+            # Read payload
+            payload = await self._read_exactly(size)
+
+            if len(payload) < 1:
+                logger.warning("MeshCore(raw): empty payload")
+                continue
+
+            pkt_type = payload[0]
+            return pkt_type, payload[1:]
+
+    async def send_frame(self, payload: bytes) -> None:
+        """Send one frame: 0x3C + 2-byte LE size + payload."""
+        size = len(payload)
+        frame = bytes([FRAME_SEND_MARKER]) + size.to_bytes(2, "little") + payload
+        self.writer.write(frame)
+        await self.writer.drain()
+
+    # ── Command dispatch ─────────────────────────────────────────────────
+
+    async def send_command(self, cmd_bytes: bytes,
+                           expected_types: List[int],
+                           timeout: float = 15.0) -> Tuple[int, bytes]:
+        """Send a command and wait for one of the expected response types.
+
+        Returns (packet_type, payload_bytes).
+        Uses the command lock to serialize all TCP traffic.
+        """
+        async with self._cmd_lock:
+            await self.send_frame(cmd_bytes)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                pkt_type, payload = await self.read_frame()
+                if pkt_type in expected_types:
+                    return pkt_type, payload
+                # Unsolicited message (e.g. push notification) — handle it
+                await self._handle_unsolicited(pkt_type, payload)
+            return PKT_ERROR, b"\x01"  # timeout → generic error
+
+    async def _handle_unsolicited(self, pkt_type: int, payload: bytes) -> None:
+        """Handle unsolicited messages that arrive during command waits.
+
+        These are push notifications (ACK, MESSAGES_WAITING, ADVERTISEMENT)
+        or messages that arrived while we were waiting for a command response.
+        Subclasses override this to route messages to handlers.
+        """
+        pass
+
+    # ── Response parsers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def parse_self_info(payload: bytes) -> dict:
+        """Parse SELF_INFO (0x05) response."""
+        buf = io.BytesIO(payload)
+        info = {}
+        info["adv_type"] = buf.read(1)[0]
+        info["tx_power"] = buf.read(1)[0]
+        info["max_tx_power"] = buf.read(1)[0]
+        info["public_key"] = buf.read(32).hex()
+        info["adv_lat"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
+        info["adv_lon"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
+        info["multi_acks"] = buf.read(1)[0]
+        info["adv_loc_policy"] = buf.read(1)[0]
+        tm = buf.read(1)[0]
+        info["telemetry_mode_env"] = (tm >> 4) & 0b11
+        info["telemetry_mode_loc"] = (tm >> 2) & 0b11
+        info["telemetry_mode_base"] = tm & 0b11
+        info["manual_add_contacts"] = buf.read(1)[0] > 0
+        info["radio_freq"] = int.from_bytes(buf.read(4), "little") / 1000
+        info["radio_bw"] = int.from_bytes(buf.read(4), "little") / 1000
+        info["radio_sf"] = buf.read(1)[0]
+        info["radio_cr"] = buf.read(1)[0]
+        info["name"] = buf.read().decode("utf-8", "ignore").replace("\x00", "")
+        return info
+
+    @staticmethod
+    def parse_device_info(payload: bytes) -> dict:
+        """Parse DEVICE_INFO (0x0D) response."""
+        buf = io.BytesIO(payload)
+        info = {}
+        fw_ver = buf.read(1)[0]
+        info["fw_ver"] = fw_ver
+        if fw_ver >= 3:
+            info["max_contacts"] = buf.read(1)[0] * 2
+            info["max_channels"] = buf.read(1)[0]
+            info["ble_pin"] = int.from_bytes(buf.read(4), "little")
+            info["fw_build"] = buf.read(12).decode("utf-8", "ignore").replace("\x00", "")
+            info["model"] = buf.read(40).decode("utf-8", "ignore").replace("\x00", "")
+            info["ver"] = buf.read(20).decode("utf-8", "ignore").replace("\x00", "")
+        if fw_ver >= 9:
+            rpt = buf.read(1)
+            if len(rpt) > 0:
+                info["repeat"] = (rpt[0] != 0)
+        if fw_ver >= 10:
+            info["path_hash_mode"] = buf.read(1)[0]
+        return info
+
+    @staticmethod
+    def parse_battery(payload: bytes) -> dict:
+        """Parse BATTERY (0x0C) response."""
+        if len(payload) < 2:
+            return {"level": 0}
+        level = int.from_bytes(payload[:2], "little")
+        result = {"level": level}
+        if len(payload) >= 10:
+            result["used_kb"] = int.from_bytes(payload[2:6], "little")
+            result["total_kb"] = int.from_bytes(payload[6:10], "little")
+        return result
+
+    @staticmethod
+    def parse_msg_sent(payload: bytes) -> dict:
+        """Parse MSG_SENT (0x06) response."""
+        buf = io.BytesIO(payload)
+        return {
+            "type": buf.read(1)[0],
+            "expected_ack": buf.read(4).hex(),
+            "suggested_timeout": int.from_bytes(buf.read(4), "little"),
+        }
+
+    @staticmethod
+    def parse_contact_msg(payload: bytes, is_v3: bool = False) -> dict:
+        """Parse CONTACT_MSG_RECV (0x07) or V3 (0x10)."""
+        buf = io.BytesIO(payload)
+        msg = {"type": "PRIV"}
+        if is_v3:
+            msg["SNR"] = int.from_bytes(buf.read(1), "little", signed=True) / 4
+            buf.read(2)  # reserved
+        msg["pubkey_prefix"] = buf.read(6).hex()
+        plen = buf.read(1)[0]
+        if plen == 255:
+            msg["path_hash_mode"] = -1
+            msg["path_len"] = 255
+        else:
+            msg["path_hash_mode"] = plen >> 6
+            msg["path_len"] = plen & 0x3F
+        msg["txt_type"] = buf.read(1)[0]
+        msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little")
+        if msg["txt_type"] == 2:
+            msg["signature"] = buf.read(4).hex()
+        msg["text"] = buf.read().decode("utf-8", "ignore")
+        return msg
+
+    @staticmethod
+    def parse_channel_msg(payload: bytes, is_v3: bool = False) -> dict:
+        """Parse CHANNEL_MSG_RECV (0x08) or V3 (0x11)."""
+        buf = io.BytesIO(payload)
+        msg = {"type": "CHAN"}
+        if is_v3:
+            msg["SNR"] = int.from_bytes(buf.read(1), "little", signed=True) / 4
+            buf.read(2)  # reserved
+        msg["channel_idx"] = buf.read(1)[0]
+        plen = buf.read(1)[0]
+        if plen == 255:
+            msg["path_hash_mode"] = -1
+            msg["path_len"] = 255
+        else:
+            msg["path_hash_mode"] = plen >> 6
+            msg["path_len"] = plen & 0x3F
+        msg["txt_type"] = buf.read(1)[0]
+        msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little", signed=False)
+        msg["text"] = buf.read().decode("utf-8", "ignore")
+        return msg
+
+    @staticmethod
+    def parse_contact(payload: bytes) -> dict:
+        """Parse CONTACT (0x03) entry."""
+        buf = io.BytesIO(payload)
+        c = {}
+        c["public_key"] = buf.read(32).hex()
+        c["type"] = buf.read(1)[0]
+        c["flags"] = buf.read(1)[0]
+        plen = buf.read(1)[0]
+        if plen == 255:
+            c["out_path_hash_mode"] = -1
+            c["out_path_len"] = -1
+        else:
+            c["out_path_hash_mode"] = plen >> 6
+            c["out_path_len"] = plen & 0x3F
+        c["out_path"] = buf.read(64).replace(b"\x00", b"").hex()
+        c["adv_name"] = buf.read(32).decode("utf-8", "ignore").replace("\x00", "")
+        c["last_advert"] = int.from_bytes(buf.read(4), "little")
+        c["adv_lat"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
+        c["adv_lon"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
+        c["lastmod"] = int.from_bytes(buf.read(4), "little")
+        return c
+
+    @staticmethod
+    def parse_channel_info(payload: bytes) -> dict:
+        """Parse CHANNEL_INFO (0x12) response."""
+        buf = io.BytesIO(payload)
+        info = {"channel_idx": buf.read(1)[0]}
+        # Channel name follows (variable length, null-terminated or to end)
+        remaining = buf.read()
+        info["channel_name"] = remaining.decode("utf-8", "ignore").replace("\x00", "")
+        return info
+
+    @staticmethod
+    def parse_stats(payload: bytes) -> dict:
+        """Parse STATS (0x18) response."""
+        if len(payload) < 1:
+            return {}
+        stats_type = payload[0]
+        data = payload[1:]
+        if stats_type == 0:  # core
+            if len(data) >= 9:
+                battery_mv, uptime, errors, queue_len = struct.unpack('<H I H B', data[:9])
+                return {"battery_mv": battery_mv, "uptime_secs": uptime,
+                        "errors": errors, "queue_len": queue_len}
+        elif stats_type == 1:  # radio
+            if len(data) >= 12:
+                noise, rssi, snr_scaled, tx_air, rx_air = struct.unpack('<h b b I I', data[:12])
+                return {"noise_floor": noise, "last_rssi": rssi,
+                        "last_snr": snr_scaled / 4.0, "tx_air_secs": tx_air,
+                        "rx_air_secs": rx_air}
+        elif stats_type == 2:  # packets
+            if len(data) >= 24:
+                recv, sent, flood_tx, direct_tx, flood_rx, direct_rx = \
+                    struct.unpack('<I I I I I I', data[:24])
+                result = {"recv": recv, "sent": sent, "flood_tx": flood_tx,
+                          "direct_tx": direct_tx, "flood_rx": flood_rx,
+                          "direct_rx": direct_rx}
+                if len(data) >= 28:
+                    result["recv_errors"] = struct.unpack('<I', data[24:28])[0]
+                return result
+        return {}
+
+
+# ── MeshCore Adapter ──────────────────────────────────────────────────────
 
 class MeshCoreAdapter(BasePlatformAdapter):
-    """Async MeshCore adapter implementing the BasePlatformAdapter interface."""
+    """MeshCore adapter using raw binary protocol — no meshcore_py."""
 
     def __init__(self, config, **kwargs):
         platform = Platform("meshcore")
         super().__init__(config=config, platform=platform)
-
         extra = getattr(config, "extra", {}) or {}
 
-        # Connection settings
         self.host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
         self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
         self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "Jarvis")
 
-        # Auth — node ID based
         admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
-        self.admin_nodes: Set[str] = {
-            n.strip() for n in admin_raw.split(",") if n.strip()
-        }
+        self.admin_nodes: Set[str] = {n.strip() for n in admin_raw.split(",") if n.strip()}
 
-        # Channel monitoring
         channels_raw = os.getenv("MESHCORE_MONITOR_CHANNELS") or extra.get("monitor_channels", "")
         self.monitor_channels: Optional[Set[int]] = None
         if channels_raw.strip():
-            self.monitor_channels = {
-                int(c.strip()) for c in channels_raw.split(",") if c.strip().isdigit()
-            }
+            self.monitor_channels = {int(c.strip()) for c in channels_raw.split(",") if c.strip().isdigit()}
 
-        # DM support
         enable_dms = os.getenv("MESHCORE_ENABLE_DMS") or extra.get("enable_dms", "true")
         self.enable_dms = enable_dms.lower() in {"1", "true", "yes"}
 
-        # Channel mention requirement
         require_mention = os.getenv("MESHCORE_REQUIRE_MENTION") or extra.get("require_mention", "true")
         self.require_mention = require_mention.lower() in {"1", "true", "yes"}
 
-        # Admin channels — channels trusted for admin-level replies
         admin_channels_raw = os.getenv("MESHCORE_ADMIN_CHANNELS") or extra.get("admin_channels", "")
-        self.admin_channels: Set[int] = {
-            int(c.strip()) for c in admin_channels_raw.split(",") if c.strip().isdigit()
-        }
+        self.admin_channels: Set[int] = {int(c.strip()) for c in admin_channels_raw.split(",") if c.strip().isdigit()}
 
-        # User allowlist
         allowed_raw = os.getenv("MESHCORE_ALLOWED_USERS") or extra.get("allowed_users", "")
-        self.allowed_users: Set[str] = {
-            u.strip() for u in allowed_raw.split(",") if u.strip()
-        }
+        self.allowed_users: Set[str] = {u.strip() for u in allowed_raw.split(",") if u.strip()}
 
-        # Runtime state
-        self._mc = None  # MeshCore client instance
-        self._subscriptions: list = []
+        self._conn: Optional[MeshCoreRawConnection] = None
+        self._contacts: Dict[str, dict] = {}
         self._discovered_channels: Set[int] = set()
-        self._contacts: Dict[str, Any] = {}
-        self._path_hash_size: int = 1  # Default 1-byte, updated on connect
+        self._path_hash_size: int = 1
+        self._self_info: dict = {}
+        self._poll_task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._last_message_time: float = 0.0
+        self._watchdog_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -107,407 +446,388 @@ class MeshCoreAdapter(BasePlatformAdapter):
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> bool:
-        """Connect to the MeshCore node via TCP and subscribe to events."""
         if not self.host:
             logger.error("MeshCore: MESHCORE_HOST must be configured")
-            self._set_fatal_error(
-                "config_missing",
-                "MESHCORE_HOST must be set",
-                retryable=False,
-            )
+            self._set_fatal_error("config_missing", "MESHCORE_HOST must be set", retryable=False)
             return False
 
-        try:
-            from meshcore import MeshCore, EventType as MCEventType
-        except ImportError:
-            logger.error("MeshCore: meshcore_py library not installed")
-            self._set_fatal_error(
-                "dependency_missing",
-                "meshcore_py library not installed. Run: pip install meshcore",
-                retryable=False,
-            )
-            return False
+        self._conn = MeshCoreRawConnection(self.host, self.port)
+        # Override _handle_unsolicited to route messages to our handlers
+        self._conn._handle_unsolicited = self._route_unsolicited
 
         try:
-            self._mc = await MeshCore.create_tcp(self.host, self.port)
-            logger.info("MeshCore: connected to %s:%s", self.host, self.port)
+            await self._conn.connect()
         except Exception as e:
-            logger.error("MeshCore: failed to connect to %s:%s — %s", self.host, self.port, e)
+            logger.error("MeshCore: connect failed — %s", e)
             self._set_fatal_error("connect_failed", str(e), retryable=True)
             return False
 
-        # Load contacts and trigger exchange
+        # Send APP_START to initialize session
         try:
-            await self._mc.ensure_contacts()
-            result = await self._mc.commands.get_contacts()
-            if not result.is_error():
-                self._contacts = result.payload or {}
-                logger.info("MeshCore: loaded %d contacts", len(self._contacts))
+            pkt_type, payload = await self._conn.send_command(
+                b"\x01\x03   hermes",
+                [PKT_SELF_INFO, PKT_ERROR],
+            )
+            if pkt_type == PKT_SELF_INFO:
+                self._self_info = MeshCoreRawConnection.parse_self_info(payload)
+                logger.info("MeshCore: self_info loaded, name=%s", self._self_info.get("name", "?"))
+            else:
+                logger.warning("MeshCore: APP_START returned error: %s", payload.hex())
         except Exception as e:
-            logger.warning("MeshCore: failed to load contacts: %s", e)
+            logger.warning("MeshCore: APP_START failed: %s", e)
 
-        # Send flood advert so other nodes can discover us
+        # Load contacts
         try:
-            await self._mc.commands.send_advert(flood=True)
-            logger.info("MeshCore: sent flood advert for node discovery")
+            await self._load_contacts()
         except Exception as e:
-            logger.warning("MeshCore: advert send failed: %s", e)
+            logger.warning("MeshCore: contacts failed: %s", e)
 
-        # Subscribe to new contacts so we pick up nodes as they appear
-        new_contact_sub = self._mc.subscribe(
-            MCEventType.NEW_CONTACT,
-            self._handle_new_contact,
-        )
-        self._subscriptions.append(new_contact_sub)
-
-        # Load channel decryption secrets — required before auto-fetch
-        # so channel messages can be decrypted and delivered.
-        # Always load ALL channels (not just monitored) — the node needs
-        # every channel secret registered before it delivers any CHANNEL_MSG.
+        # Send flood advert
         try:
-            self._mc.set_decrypt_channel_logs = True
-            channels_to_load = set(self.monitor_channels or [])
-            # Also load 0-3 unconditionally — channel 0 (Public) is always
-            # active and its secret must be loaded for the auto-fetch loop.
-            for i in range(4):
-                channels_to_load.add(i)
-            for idx in sorted(channels_to_load):
-                result = await self._mc.commands.get_channel(idx)
-                if not result.is_error():
-                    ch = result.payload
-                    name = ch.get("channel_name", "")
-                    self._discovered_channels.add(idx)
-                    if name:
-                        logger.info("MeshCore: loaded channel %d: %s", idx, name)
+            await self._conn.send_command(b"\x07\x01", [PKT_OK, PKT_ERROR])
+            logger.info("MeshCore: sent flood advert")
+        except Exception:
+            pass
+
+        # Load channel secrets
+        try:
+            await self._load_channels()
         except Exception as e:
-            logger.warning("MeshCore: failed to load channel secrets: %s", e)
+            logger.warning("MeshCore: channel secrets failed: %s", e)
 
-        # Subscribe to channel messages
-        chan_sub = self._mc.subscribe(
-            MCEventType.CHANNEL_MSG_RECV,
-            self._handle_channel_message,
-        )
-        self._subscriptions.append(chan_sub)
-
-        # Subscribe to direct messages
-        dm_sub = self._mc.subscribe(
-            MCEventType.CONTACT_MSG_RECV,
-            self._handle_direct_message,
-        )
-        self._subscriptions.append(dm_sub)
-
-        # Start auto-fetching messages from the device
-        await self._mc.start_auto_message_fetching()
-
-        # Fetch path hash size for correct path interpretation
+        # Get path hash size
         try:
-            phm = await self._mc.commands.get_path_hash_mode()
-            self._path_hash_size = phm + 1  # 0=1-byte, 1=2-byte
-            logger.info("MeshCore: path hash size = %d-byte", self._path_hash_size)
+            pkt_type, payload = await self._conn.send_command(
+                b"\x16\x03", [PKT_DEVICE_INFO, PKT_ERROR])
+            if pkt_type == PKT_DEVICE_INFO:
+                dev = MeshCoreRawConnection.parse_device_info(payload)
+                if "path_hash_mode" in dev:
+                    self._path_hash_size = dev["path_hash_mode"] + 1
+                    logger.info("MeshCore: path hash size = %d-byte", self._path_hash_size)
         except Exception:
             pass
 
         self._mark_connected()
-        logger.info(
-            "MeshCore: connected, monitoring channels%s, DMs %s",
-            f" {sorted(self.monitor_channels) if self.monitor_channels else '(discovery mode)'}",
-            "enabled" if self.enable_dms else "disabled",
-        )
+        logger.info("MeshCore: connected (raw protocol), channels=%s, DMs=%s",
+                    sorted(self.monitor_channels) if self.monitor_channels else "(discovery)",
+                    "on" if self.enable_dms else "off")
+        self._start_poll()
+        self._start_keepalive()
+        self._start_watchdog()
         return True
 
     async def disconnect(self) -> None:
-        """Disconnect from the MeshCore node."""
+        self._stop_watchdog()
+        self._stop_keepalive()
+        self._stop_poll()
         self._mark_disconnected()
-
-        if self._mc:
-            for sub in self._subscriptions:
-                try:
-                    self._mc.unsubscribe(sub)
-                except Exception:
-                    pass
-            self._subscriptions.clear()
-
+        if self._conn:
             try:
-                await self._mc.stop_auto_message_fetching()
+                await self._conn.disconnect()
             except Exception:
                 pass
-
-            try:
-                await self._mc.disconnect()
-            except Exception:
-                pass
-
-            self._mc = None
-
+            self._conn = None
         self._contacts.clear()
         self._discovered_channels.clear()
 
-    # ── Node management (admin-only runtime operations) ───────────────────
+    async def _load_contacts(self) -> None:
+        """Load all contacts from the node."""
+        pkt_type, payload = await self._conn.send_command(
+            b"\x04", [PKT_CONTACT_START, PKT_ERROR])
+        if pkt_type == PKT_ERROR:
+            return
 
-    async def get_node_info(self) -> Dict[str, Any]:
-        """Get device info, battery, and stats from the connected node."""
-        if not self._mc:
-            return {"error": "Not connected"}
+        # CONTACT_START gives us the count
+        contact_nb = int.from_bytes(payload[:4], "little") if len(payload) >= 4 else 0
 
-        info: Dict[str, Any] = {}
+        contacts = {}
+        for _ in range(contact_nb):
+            pkt_type, payload = await self._conn.read_frame()
+            if pkt_type == PKT_CONTACT:
+                c = MeshCoreRawConnection.parse_contact(payload)
+                contacts[c["public_key"]] = c
+            elif pkt_type == PKT_CONTACT_END:
+                break
 
+        # Read CONTACT_END
         try:
-            result = await self._mc.commands.send_device_query()
-            if not result.is_error():
-                info["device"] = result.payload
-                # Extract path_hash_mode for convenience
-                phm = result.payload.get("path_hash_mode")
-                if phm is not None:
-                    info["path_hash_mode"] = phm
-                    info["path_hash_size"] = phm + 1  # 0=1-byte, 1=2-byte
-        except Exception as e:
-            info["device_error"] = str(e)
+            pkt_type, payload = await self._conn.read_frame()
+        except Exception:
+            pass
 
-        try:
-            result = await self._mc.commands.send_appstart()
-            if not result.is_error():
-                info["self"] = result.payload
-        except Exception as e:
-            info["self_error"] = str(e)
+        self._contacts = contacts
+        logger.info("MeshCore: loaded %d contacts", len(contacts))
 
-        try:
-            result = await self._mc.commands.get_bat()
-            if not result.is_error():
-                info["battery"] = result.payload
-        except Exception as e:
-            info["battery_error"] = str(e)
-
-        try:
-            result = await self._mc.commands.get_self_telemetry()
-            if not result.is_error():
-                info["telemetry"] = result.payload
-        except Exception as e:
-            info["telemetry_error"] = str(e)
-
-        info["contacts"] = len(self._contacts)
-        info["discovered_channels"] = sorted(self._discovered_channels)
-        info["monitored_channels"] = sorted(self.monitor_channels) if self.monitor_channels else "(discovery mode)"
-
-        return info
-
-    async def get_channel_info(self, channel_idx: int) -> Dict[str, Any]:
-        """Get info for a specific channel."""
-        if not self._mc:
-            return {"error": "Not connected"}
-        result = await self._mc.commands.get_channel(channel_idx)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return result.payload
-
-    async def set_channel_config(
-        self, channel_idx: int, name: str, secret_hex: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Configure a channel name and optional secret.
-
-        If secret_hex is provided, it must be 32 hex chars (16 bytes).
-        If omitted, the secret is derived from the channel name hash.
-        """
-        if not self._mc:
-            return {"error": "Not connected"}
-
-        secret = None
-        if secret_hex:
+    async def _load_channels(self) -> None:
+        """Load channel secrets for channels 0-3 + monitored channels."""
+        channels_to_load = set(self.monitor_channels or [])
+        for i in range(4):
+            channels_to_load.add(i)
+        for idx in sorted(channels_to_load):
             try:
-                secret = bytes.fromhex(secret_hex)
-            except ValueError:
-                return {"error": "Invalid hex secret — must be 32 hex chars (16 bytes)"}
-
-        result = await self._mc.commands.set_channel(channel_idx, name, secret)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return {"success": True, "channel_idx": channel_idx, "name": name}
-
-    async def set_radio_params(
-        self, freq: float, bw: float, sf: int, cr: int
-    ) -> Dict[str, Any]:
-        """Set radio parameters: frequency (MHz), bandwidth (kHz),
-        spreading factor, coding rate."""
-        if not self._mc:
-            return {"error": "Not connected"}
-        result = await self._mc.commands.set_radio(freq, bw, sf, cr)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return {"success": True, "freq": freq, "bw": bw, "sf": sf, "cr": cr}
-
-    async def set_tx_power(self, power: int) -> Dict[str, Any]:
-        """Set TX power level."""
-        if not self._mc:
-            return {"error": "Not connected"}
-        result = await self._mc.commands.set_tx_power(power)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return {"success": True, "tx_power": power}
-
-    async def set_node_name(self, name: str) -> Dict[str, Any]:
-        """Set the MeshCore node's advertised name."""
-        if not self._mc:
-            return {"error": "Not connected"}
-        result = await self._mc.commands.set_name(name)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return {"success": True, "name": name}
-
-    async def set_telemetry_modes(
-        self, base: int = None, loc: int = None, env: int = None
-    ) -> Dict[str, Any]:
-        """Configure telemetry reporting modes (0-3 each)."""
-        if not self._mc:
-            return {"error": "Not connected"}
-
-        # Get current settings first
-        info = await self._mc.commands.send_appstart()
-        if info.is_error():
-            return {"error": f"Failed to get current settings: {info.payload}"}
-
-        infos = info.payload
-        if base is not None:
-            infos["telemetry_mode_base"] = base
-        if loc is not None:
-            infos["telemetry_mode_loc"] = loc
-        if env is not None:
-            infos["telemetry_mode_env"] = env
-
-        result = await self._mc.commands.set_other_params_from_infos(infos)
-        if result.is_error():
-            return {"error": str(result.payload)}
-        return {"success": True, "modes": {
-            "base": infos.get("telemetry_mode_base"),
-            "loc": infos.get("telemetry_mode_loc"),
-            "env": infos.get("telemetry_mode_env"),
-        }}
-
-    async def reboot_node(self) -> Dict[str, Any]:
-        """Reboot the MeshCore node."""
-        if not self._mc:
-            return {"error": "Not connected"}
-        result = await self._mc.commands.reboot()
-        return {"success": True, "message": "Reboot command sent"}
-
-    async def get_stats(self) -> Dict[str, Any]:
-        """Get node statistics (core, radio, packets)."""
-        if not self._mc:
-            return {"error": "Not connected"}
-
-        stats = {}
-        for name, method in [
-            ("core", self._mc.commands.get_stats_core),
-            ("radio", self._mc.commands.get_stats_radio),
-            ("packets", self._mc.commands.get_stats_packets),
-        ]:
-            try:
-                result = await method()
-                if not result.is_error():
-                    stats[name] = result.payload
-                else:
-                    stats[f"{name}_error"] = str(result.payload)
+                pkt_type, payload = await self._conn.send_command(
+                    bytes([CMD_GET_CHANNEL, idx]),
+                    [PKT_CHANNEL_INFO, PKT_ERROR])
+                if pkt_type == PKT_CHANNEL_INFO:
+                    ch = MeshCoreRawConnection.parse_channel_info(payload)
+                    name = ch.get("channel_name", "")
+                    self._discovered_channels.add(idx)
+                    if name:
+                        logger.info("MeshCore: loaded channel %d: %s", idx, name)
             except Exception as e:
-                stats[f"{name}_error"] = str(e)
-        return stats
+                logger.debug("MeshCore: channel %d load failed: %s", idx, e)
+
+    # ── Unsolicited message routing ────────────────────────────────────────
+
+    async def _route_unsolicited(self, pkt_type: int, payload: bytes) -> None:
+        """Route unsolicited messages (push notifications, incoming messages)
+        that arrive during command waits."""
+        if pkt_type == PKT_CONTACT_MSG_RECV:
+            msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=False)
+            await self._handle_direct_message(msg)
+        elif pkt_type == PKT_CONTACT_MSG_RECV_V3:
+            msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=True)
+            await self._handle_direct_message(msg)
+        elif pkt_type == PKT_CHANNEL_MSG_RECV:
+            msg = MeshCoreRawConnection.parse_channel_msg(payload, is_v3=False)
+            await self._handle_channel_message(msg)
+        elif pkt_type == PKT_CHANNEL_MSG_RECV_V3:
+            msg = MeshCoreRawConnection.parse_channel_msg(payload, is_v3=True)
+            await self._handle_channel_message(msg)
+        elif pkt_type == PKT_NEW_ADVERT:
+            c = MeshCoreRawConnection.parse_contact(payload)
+            pubkey = c.get("public_key", "")
+            if pubkey:
+                self._contacts[pubkey] = c
+                logger.info("MeshCore: new contact: %s", c.get("adv_name", pubkey[:12]))
+        # ACK, MESSAGES_WAITING, ADVERTISEMENT — silently consumed
+
+    # ── Poll loop ─────────────────────────────────────────────────────────
+
+    def _start_poll(self):
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = asyncio.create_task(self._poll_loop())
+
+    def _stop_poll(self):
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+        self._poll_task = None
+
+    async def _poll_loop(self):
+        """Poll for messages every 2 seconds using CMD_SYNC_NEXT_MESSAGE."""
+        while self._conn and self._conn.is_connected:
+            try:
+                pkt_type, payload = await self._conn.send_command(
+                    b"\x0A",
+                    [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                     PKT_CHANNEL_MSG_RECV, PKT_CHANNEL_MSG_RECV_V3,
+                     PKT_NO_MORE_MSGS, PKT_ERROR],
+                    timeout=5.0,
+                )
+                if pkt_type == PKT_CONTACT_MSG_RECV:
+                    msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=False)
+                    await self._handle_direct_message(msg)
+                elif pkt_type == PKT_CONTACT_MSG_RECV_V3:
+                    msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=True)
+                    await self._handle_direct_message(msg)
+                elif pkt_type == PKT_CHANNEL_MSG_RECV:
+                    msg = MeshCoreRawConnection.parse_channel_msg(payload, is_v3=False)
+                    await self._handle_channel_message(msg)
+                elif pkt_type == PKT_CHANNEL_MSG_RECV_V3:
+                    msg = MeshCoreRawConnection.parse_channel_msg(payload, is_v3=True)
+                    await self._handle_channel_message(msg)
+                # NO_MORE_MSGS or ERROR → sleep then retry
+            except Exception as e:
+                logger.debug("MeshCore: poll error (non-fatal): %s", e)
+            await asyncio.sleep(2.0)
+
+    # ── Keepalive ─────────────────────────────────────────────────────────
+
+    def _start_keepalive(self):
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    def _stop_keepalive(self):
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+        self._keepalive_task = None
+
+    async def _keepalive_loop(self):
+        """get_bat() every 30s — keeps TCP pipe alive."""
+        while self._conn and self._conn.is_connected:
+            await asyncio.sleep(30)
+            if not self._conn or not self._conn.is_connected:
+                return
+            try:
+                await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
+            except Exception:
+                pass
+
+    # ── Watchdog ──────────────────────────────────────────────────────────
+
+    def _start_watchdog(self):
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._last_message_time = time.time()
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    def _stop_watchdog(self):
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+        self._watchdog_task = None
+
+    async def _watchdog_loop(self):
+        """Reconnect if no messages for 120 seconds."""
+        while self._conn and self._conn.is_connected:
+            await asyncio.sleep(30)
+            if not self._conn or not self._conn.is_connected:
+                return
+            if time.time() - self._last_message_time > 120 and self._last_message_time > 0:
+                logger.warning("MeshCore: watchdog — reconnecting")
+                self._stop_keepalive()
+                self._stop_poll()
+                self._mark_disconnected()
+                try:
+                    await self._conn.disconnect()
+                except Exception:
+                    pass
+                self._conn = None
+                self._contacts.clear()
+                try:
+                    await self.connect()
+                except Exception as e:
+                    logger.error("MeshCore: watchdog reconnect error: %s", e)
+                return
 
     # ── Sending ───────────────────────────────────────────────────────────
 
-    async def send(
-        self,
-        chat_id: str,
-        content: str,
-        reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ):
-        """Send a message back to a MeshCore channel or contact.
-
-        chat_id format:
-          - "channel:<idx>" for channel messages
-          - "dm:<pubkey_prefix>" for direct messages
-
-        Messages longer than 150 chars are split into multiple packets
-        at word boundaries and sent sequentially with a short delay.
-        """
-        if not self._mc:
+    async def send(self, chat_id: str, content: str, reply_to=None, metadata=None):
+        if not self._conn or not self._conn.is_connected:
             return SendResult(success=False, error="Not connected")
 
-        # Split into 150-char chunks at word boundaries
         raw_chunks = self._split_for_mesh(content, max_len=150)
-
-        # Add chunk markers for multi-packet messages so the receiver
-        # knows they're part of a sequence and nothing is missing.
-        # Split directly at marker-aware size in ONE pass — no re-splitting.
-        # Reserve 13 chars for " ..." + " (99/99)" (worst-case suffix/marker).
         if len(raw_chunks) > 1:
-            # Re-split the full text at 137 chars (150 - 13) so every chunk
-            # fits its marker without a second pass.
             marker_aware = self._split_for_mesh(content, max_len=137)
             total = len(marker_aware)
-            chunks = []
-            for i, chunk in enumerate(marker_aware):
-                suffix = " ..." if i < total - 1 else ""
-                marker = f" ({i+1}/{total})"
-                chunks.append(chunk + suffix + marker)
+            chunks = [c + (" ..." if i < total - 1 else "") + f" ({i+1}/{total})"
+                      for i, c in enumerate(marker_aware)]
         else:
             chunks = raw_chunks
 
-        message_ids = []
-        errors = []
-
+        message_ids, errors = [], []
         for i, chunk in enumerate(chunks):
             try:
                 if chat_id.startswith("channel:"):
                     channel_idx = int(chat_id.split(":", 1)[1])
-                    # send_chan_msg has no built-in retry — add our own
-                    result = None
-                    for attempt in range(3):
-                        result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
-                        if not result.is_error():
-                            break
-                        logger.debug("MeshCore: chan send attempt %d failed: %s", attempt + 1, result.payload)
-                        await asyncio.sleep(1.0)
+                    result = await self._send_channel_msg(channel_idx, chunk)
                 elif chat_id.startswith("dm:"):
                     pubkey_prefix = chat_id.split(":", 1)[1]
-                    contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
-                    if contact is None:
-                        return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
-                    result = await self._mc.commands.send_msg_with_retry(
-                        contact, chunk, max_attempts=3
-                    )
+                    result = await self._send_dm(pubkey_prefix, chunk)
                 else:
-                    return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
+                    return SendResult(success=False, error=f"Invalid chat_id: {chat_id}")
 
-                if result.is_error():
-                    errors.append(f"chunk {i+1}: {result.payload}")
+                if result is None:
+                    errors.append(f"chunk {i+1}: send failed")
+                elif isinstance(result, str):
+                    errors.append(f"chunk {i+1}: {result}")
                 else:
                     message_ids.append(str(int(time.time() * 1000)))
-
-                # Small delay between chunks to avoid flooding the mesh
                 if i < len(chunks) - 1:
                     await asyncio.sleep(0.5)
-
             except Exception as e:
                 errors.append(f"chunk {i+1}: {e}")
 
         if errors and not message_ids:
             return SendResult(success=False, error="; ".join(errors))
-        if errors:
-            logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
-                           len(message_ids), len(chunks), errors)
         return SendResult(
             success=True,
             message_id=message_ids[0] if message_ids else "",
             continuation_message_ids=tuple(message_ids[1:]) if len(message_ids) > 1 else (),
         )
 
+    async def _send_channel_msg(self, channel_idx: int, text: str) -> Optional[str]:
+        """Send a channel message. Returns None on success, error string on failure."""
+        timestamp = int(time.time())
+        cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
+              timestamp.to_bytes(4, "little") + text.encode("utf-8")
+        for attempt in range(3):
+            try:
+                pkt_type, payload = await self._conn.send_command(
+                    cmd, [PKT_OK, PKT_ERROR], timeout=10.0)
+                if pkt_type == PKT_OK:
+                    return None
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+        return "no_event_received"
+
+    async def _send_dm(self, pubkey_prefix: str, text: str) -> Optional[str]:
+        """Send a DM with retry and ACK waiting. Returns None on success."""
+        contact = self._contacts.get(pubkey_prefix)
+        if contact is None:
+            # Try prefix match
+            prefix_lower = pubkey_prefix.lower()
+            for cid, c in self._contacts.items():
+                if cid.lower().startswith(prefix_lower):
+                    contact = c
+                    break
+        if contact is None:
+            return f"Contact not found: {pubkey_prefix}"
+
+        dst_bytes = bytes.fromhex(contact["public_key"])[:6]
+        timestamp = int(time.time())
+        flood = contact.get("out_path_len") == -1
+        max_attempts = 3
+        flood_attempts = 0
+
+        for attempt in range(max_attempts):
+            if attempt == 2 and not flood:
+                # Reset path to flood
+                try:
+                    await self._conn.send_command(
+                        b"\x0D" + bytes.fromhex(contact["public_key"])[:32],
+                        [PKT_OK, PKT_ERROR], timeout=5.0)
+                    flood = True
+                except Exception:
+                    pass
+
+            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, attempt]) + \
+                  timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
+            try:
+                pkt_type, payload = await self._conn.send_command(
+                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                if pkt_type == PKT_ERROR:
+                    if flood:
+                        flood_attempts += 1
+                    continue
+
+                sent = MeshCoreRawConnection.parse_msg_sent(payload)
+                exp_ack = sent["expected_ack"]
+                timeout_s = sent["suggested_timeout"] / 1000 * 1.2
+
+                # Wait for ACK
+                deadline = time.time() + max(timeout_s, 5.0)
+                while time.time() < deadline:
+                    ack_type, ack_payload = await self._conn.read_frame()
+                    if ack_type == PKT_ACK:
+                        ack_code = ack_payload.hex() if ack_payload else ""
+                        if ack_code == exp_ack:
+                            return None
+                    elif ack_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                                      PKT_CHANNEL_MSG_RECV, PKT_CHANNEL_MSG_RECV_V3):
+                        await self._route_unsolicited(ack_type, ack_payload)
+                # ACK timeout — retry
+            except Exception:
+                pass
+            if flood:
+                flood_attempts += 1
+        return "no_ack_received"
+
     @staticmethod
-    def _split_for_mesh(text: str, max_len: int = 150) -> list[str]:
-        """Split text into chunks ≤ max_len, breaking at word boundaries."""
+    def _split_for_mesh(text: str, max_len: int = 150) -> list:
         chunks = []
         while len(text) > max_len:
-            # Find last space within limit
             split_at = text.rfind(" ", 0, max_len)
             if split_at == -1:
-                # No space found — hard break
                 split_at = max_len
             chunks.append(text[:split_at].strip())
             text = text[split_at:].strip()
@@ -515,59 +835,33 @@ class MeshCoreAdapter(BasePlatformAdapter):
             chunks.append(text)
         return chunks or [""]
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """MeshCore has no typing indicator — no-op."""
+    async def send_typing(self, chat_id, metadata=None):
         pass
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         if chat_id.startswith("channel:"):
-            idx = chat_id.split(":", 1)[1]
-            return {"name": f"Channel {idx}", "type": "group", "chat_id": chat_id}
+            return {"name": f"Channel {chat_id.split(':',1)[1]}", "type": "group", "chat_id": chat_id}
         elif chat_id.startswith("dm:"):
             pubkey = chat_id.split(":", 1)[1]
             contact = self._contacts.get(pubkey, {})
-            name = contact.get("adv_name", pubkey[:8])
-            return {"name": name, "type": "dm", "chat_id": chat_id}
+            return {"name": contact.get("adv_name", pubkey[:8]), "type": "dm", "chat_id": chat_id}
         return {"name": chat_id, "type": "unknown"}
 
     # ── Message handlers ──────────────────────────────────────────────────
 
-    async def _handle_channel_message(self, event):
-        """Handle an incoming channel message from MeshCore."""
-        msg = event.payload
+    async def _handle_channel_message(self, msg: dict):
+        self._last_message_time = time.time()
         channel_idx = msg.get("channel_idx")
         text = msg.get("text", "")
-        pubkey_prefix = msg.get("pubkey_prefix", "")
 
-        # Radio metadata (available when decrypt_channels is enabled)
-        rssi = msg.get("RSSI")
-        snr = msg.get("SNR")
-        path_len = msg.get("path_len")
-        path = msg.get("path")
-        sender_timestamp = msg.get("sender_timestamp")
-        attempt = msg.get("attempt")
+        logger.info("MeshCore: CHANNEL ch=%s from=%s text=%s",
+                    channel_idx, text.split(":",1)[0].strip() if ":" in text else "?", text[:50])
 
-        logger.info(
-            "MeshCore: CHANNEL msg channel=%s from=%s text=%s rssi=%s snr=%s hops=%s",
-            channel_idx,
-            text.split(":", 1)[0].strip() if ":" in text else "?",
-            text[:60],
-            rssi,
-            snr,
-            path_len,
-        )
-
-        # Track discovered channels
         if channel_idx is not None:
             self._discovered_channels.add(channel_idx)
+        if self.monitor_channels is None or channel_idx not in self.monitor_channels:
+            return
 
-        # Check if we should respond to this channel
-        if self.monitor_channels is None:
-            return  # Discovery mode — don't respond to any channels
-        if channel_idx not in self.monitor_channels:
-            return  # Not in our monitored set
-
-        # Parse sender name from text (MeshCore format: "sender_name: message")
         sender_name = "unknown"
         user_prompt = text
         if ":" in text:
@@ -575,72 +869,37 @@ class MeshCoreAdapter(BasePlatformAdapter):
             sender_name = sender_name.strip()
             user_prompt = user_prompt.strip()
 
-        # Require @mention in channels (if enabled)
         if self.require_mention:
-            mention_patterns = [
-                f"@{self.bot_name}",
-                f"@{self.bot_name.lower()}",
-                self.bot_name + ":",
-                self.bot_name.lower() + ":",
-            ]
-            addressed = False
-            for pattern in mention_patterns:
-                if user_prompt.lower().startswith(pattern.lower()):
-                    # Strip the mention prefix
-                    user_prompt = user_prompt[len(pattern):].strip()
-                    addressed = True
+            patterns = [f"@{self.bot_name}", f"@{self.bot_name.lower()}",
+                        self.bot_name + ":", self.bot_name.lower() + ":"]
+            for p in patterns:
+                if user_prompt.lower().startswith(p.lower()):
+                    user_prompt = user_prompt[len(p):].strip()
                     break
-            if not addressed:
-                return  # Not addressed to us
+            else:
+                return
 
         if not user_prompt:
-            return  # Empty message after stripping mention
-
-        # Auth check
-        if not self._is_authorized(pubkey_prefix):
-            logger.debug("MeshCore: ignoring message from unauthorized node %s", pubkey_prefix[:8])
             return
 
-        # Channel messages are broadcasts — no pubkey_prefix in payload.
-        # Use the parsed sender name as user_id so the gateway's auth
-        # check doesn't drop the message (user_id=None is rejected).
         user_id = sender_name if sender_name != "unknown" else f"chan:{channel_idx}"
-
-        is_admin = pubkey_prefix in self.admin_nodes if pubkey_prefix else False
-
-        chat_id = f"channel:{channel_idx}"
-        logger.info("MeshCore: dispatching channel=%s chat=%s user=%s text=%s", channel_idx, chat_id, user_id, user_prompt[:40])
         await self._dispatch_message(
-            text=user_prompt,
-            chat_id=chat_id,
-            chat_type="group",
-            user_id=user_id,
-            user_name=sender_name,
-            is_admin=is_admin,
+            text=user_prompt, chat_id=f"channel:{channel_idx}", chat_type="group",
+            user_id=user_id, user_name=sender_name, is_admin=False,
             channel_idx=channel_idx,
-            metadata={
-                "rssi": rssi,
-                "snr": snr,
-                "path_len": path_len,
-                "path": path,
-                "sender_timestamp": sender_timestamp,
-                "attempt": attempt,
-            },
+            metadata={"rssi": msg.get("RSSI"), "snr": msg.get("SNR"),
+                      "path_len": msg.get("path_len"), "path": msg.get("path"),
+                      "sender_timestamp": msg.get("sender_timestamp"),
+                      "attempt": msg.get("attempt")},
         )
 
-    async def _handle_direct_message(self, event):
-        """Handle an incoming direct message from MeshCore."""
-        logger.info("MeshCore: DM received: %s", {k: v for k, v in event.payload.items() if k != 'raw'})
-
+    async def _handle_direct_message(self, msg: dict):
+        self._last_message_time = time.time()
         if not self.enable_dms:
-            logger.debug("MeshCore: DMs disabled, ignoring")
             return
-
-        msg = event.payload
         text = msg.get("text", "")
         pubkey_prefix = msg.get("pubkey_prefix", "")
 
-        # Parse sender name
         sender_name = "unknown"
         user_prompt = text
         if ":" in text:
@@ -651,333 +910,267 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not user_prompt:
             return
 
-        # Auth check
-        if not self._is_authorized(pubkey_prefix):
-            logger.debug("MeshCore: ignoring DM from unauthorized node %s", pubkey_prefix[:8])
-            return
-
-        is_admin = pubkey_prefix in self.admin_nodes
-
-        chat_id = f"dm:{pubkey_prefix}"
         await self._dispatch_message(
-            text=user_prompt,
-            chat_id=chat_id,
-            chat_type="dm",
-            user_id=pubkey_prefix,
-            user_name=sender_name,
-            is_admin=is_admin,
+            text=user_prompt, chat_id=f"dm:{pubkey_prefix}", chat_type="dm",
+            user_id=pubkey_prefix, user_name=sender_name,
+            is_admin=pubkey_prefix in self.admin_nodes,
         )
 
-    def _is_authorized(self, pubkey_prefix: str) -> bool:
-        """Check if a node is authorized to interact with the bot."""
-        if not self.allowed_users:
-            return True  # Empty allowlist = allow all
-        return pubkey_prefix in self.allowed_users
-
-    async def _handle_new_contact(self, event):
-        """Handle a newly discovered contact."""
-        data = event.payload
-        pubkey_prefix = data.get("pubkey_prefix", "")
-        adv_name = data.get("adv_name", pubkey_prefix[:8])
-        if pubkey_prefix:
-            self._contacts[pubkey_prefix] = data
-            logger.info("MeshCore: new contact discovered: %s (%s)", adv_name, pubkey_prefix[:12])
-
-    async def _dispatch_message(
-        self,
-        text: str,
-        chat_id: str,
-        chat_type: str,
-        user_id: str,
-        user_name: str,
-        is_admin: bool = False,
-        channel_idx: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Build a MessageEvent and hand it to the base class handler."""
-        logger.info("MeshCore: _dispatch_message called chat=%s user=%s text=%s", chat_id, user_id, text[:40])
+    async def _dispatch_message(self, text, chat_id, chat_type, user_id, user_name,
+                                is_admin=False, channel_idx=None, metadata=None):
         if not self._message_handler:
-            logger.error("MeshCore: _dispatch_message aborted — no _message_handler set!")
             return
 
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=chat_id,
-            chat_type=chat_type,
-            user_id=user_id,
-            user_name=user_name,
-        )
+        source = self.build_source(chat_id=chat_id, chat_name=chat_id,
+                                   chat_type=chat_type, user_id=user_id, user_name=user_name)
 
-        # Platform context injected into every MeshCore conversation
-        # so the model always knows about LoRa/mesh constraints AND security.
         security_note = ""
         if chat_type == "group":
             if channel_idx is not None and channel_idx in self.admin_channels:
-                security_note = (
-                    "This channel is TRUSTED (admin channel). "
-                    "You may share sensitive information here. "
-                )
+                security_note = "TRUSTED admin channel. "
             else:
-                security_note = (
-                    "⚠️ PUBLIC BROADCAST CHANNEL — anyone on the mesh can read this. "
-                    "NEVER share: credentials, API keys, tokens, passwords, "
-                    "personal data, IP addresses, internal hostnames, "
-                    "or any sensitive infrastructure details. "
-                    "If asked for sensitive info, say you can only share that via DM. "
-                )
+                security_note = ("⚠️ PUBLIC BROADCAST — never share credentials, keys, "
+                                 "IPs, hostnames, or personal data here. ")
         elif chat_type == "dm":
-            if is_admin:
-                security_note = (
-                    "This is an admin DM — you may share sensitive information. "
-                )
-            else:
-                security_note = (
-                    "This is a non-admin DM — be cautious with sensitive data. "
-                )
+            security_note = "Admin DM. " if is_admin else "Non-admin DM — be cautious. "
 
         platform_context = (
-            "PLATFORM CONTEXT — MeshCore (LoRa mesh radio): "
-            "You are speaking over a low-bandwidth LoRa mesh network. "
-            "Each message packet is limited to 150 characters — but you CAN "
-            "write longer responses; they will be automatically split into "
-            "multiple packets at word boundaries and sent sequentially. "
-            "Be concise but don't sacrifice completeness. "
-            "No markdown formatting (no backticks, no asterisks, no links). "
-            "Plain text only. "
+            "PLATFORM CONTEXT — MeshCore LoRa mesh: 150 char packets, "
+            "auto-split for longer responses. Plain text only, no markdown. "
             + security_note
         )
 
-        # Inject radio metadata into the platform context so the model
-        # can reference signal strength, hop count, path, etc. in replies.
         if metadata:
-            radio_parts = []
-            if metadata.get("rssi") is not None:
-                radio_parts.append(f"RSSI={metadata['rssi']}dBm")
-            if metadata.get("snr") is not None:
-                radio_parts.append(f"SNR={metadata['snr']}dB")
-            if metadata.get("path_len") is not None:
-                radio_parts.append(f"hops={metadata['path_len']}")
-            if metadata.get("path") is not None:
-                radio_parts.append(f"path={metadata['path']}")
-            if radio_parts:
-                hash_bytes = self._path_hash_size
-                platform_context += (
-                    "RADIO METADATA for this message: "
-                    + ", ".join(radio_parts)
-                    + f". The path uses {hash_bytes}-byte hop hashes "
-                    + f"(each hop = {hash_bytes * 2} hex chars). "
-                    + "You can use this data if asked about signal quality "
-                    + "or mesh routing."
-                )
+            parts = []
+            for key, label in [("rssi", "RSSI"), ("snr", "SNR"), ("path_len", "hops"), ("path", "path")]:
+                if metadata.get(key) is not None:
+                    parts.append(f"{label}={metadata[key]}")
+            if parts:
+                platform_context += "RADIO: " + ", ".join(parts) + ". "
 
         event = MessageEvent(
-            text=text,
-            message_type=MessageType.TEXT,
-            source=source,
+            text=text, message_type=MessageType.TEXT, source=source,
             message_id=str(int(time.time() * 1000)),
             timestamp=__import__("datetime").datetime.now(),
             channel_prompt=platform_context,
         )
-
         await self.handle_message(event)
-        logger.info("MeshCore: handle_message returned for chat=%s", chat_id)
+
+    # ── Node management ───────────────────────────────────────────────────
+
+    async def get_node_info(self) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        info = {"self": self._self_info, "contacts": len(self._contacts),
+                "discovered_channels": sorted(self._discovered_channels)}
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                b"\x16\x03", [PKT_DEVICE_INFO, PKT_ERROR])
+            if pkt_type == PKT_DEVICE_INFO:
+                info["device"] = MeshCoreRawConnection.parse_device_info(payload)
+        except Exception as e:
+            info["device_error"] = str(e)
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                b"\x14", [PKT_BATTERY, PKT_ERROR])
+            if pkt_type == PKT_BATTERY:
+                info["battery"] = MeshCoreRawConnection.parse_battery(payload)
+        except Exception as e:
+            info["battery_error"] = str(e)
+        return info
+
+    async def get_channel_info(self, channel_idx: int) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                bytes([CMD_GET_CHANNEL, channel_idx]),
+                [PKT_CHANNEL_INFO, PKT_ERROR])
+            if pkt_type == PKT_CHANNEL_INFO:
+                return MeshCoreRawConnection.parse_channel_info(payload)
+            return {"error": f"Error: {payload.hex()}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_channel_config(self, channel_idx: int, name: str,
+                                  secret_hex: Optional[str] = None) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        name_bytes = name.encode("utf-8")[:32].ljust(32, b"\x00")
+        if secret_hex:
+            secret = bytes.fromhex(secret_hex)
+        else:
+            from hashlib import sha256
+            secret = sha256(name.encode("utf-8")).digest()[:16]
+        cmd = bytes([CMD_SET_CHANNEL, channel_idx]) + name_bytes + secret
+        try:
+            pkt_type, _ = await self._conn.send_command(cmd, [PKT_OK, PKT_ERROR])
+            if pkt_type == PKT_OK:
+                return {"success": True, "channel_idx": channel_idx, "name": name}
+            return {"error": "Command failed"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_radio_params(self, freq: float, bw: float, sf: int, cr: int) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        cmd = bytes([CMD_SET_RADIO]) + int(freq * 1000).to_bytes(4, "little") + \
+              int(bw * 1000).to_bytes(4, "little") + bytes([sf, cr])
+        try:
+            pkt_type, _ = await self._conn.send_command(cmd, [PKT_OK, PKT_ERROR])
+            return {"success": True} if pkt_type == PKT_OK else {"error": "Command failed"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_tx_power(self, power: int) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        cmd = bytes([CMD_SET_TX_POWER]) + power.to_bytes(4, "little")
+        try:
+            pkt_type, _ = await self._conn.send_command(cmd, [PKT_OK, PKT_ERROR])
+            return {"success": True} if pkt_type == PKT_OK else {"error": "Command failed"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_node_name(self, name: str) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        cmd = bytes([CMD_SET_NAME]) + name.encode("utf-8")
+        try:
+            pkt_type, _ = await self._conn.send_command(cmd, [PKT_OK, PKT_ERROR])
+            return {"success": True} if pkt_type == PKT_OK else {"error": "Command failed"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_telemetry_modes(self, base=None, loc=None, env=None) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        infos = self._self_info.copy()
+        if base is not None:
+            infos["telemetry_mode_base"] = base
+        if loc is not None:
+            infos["telemetry_mode_loc"] = loc
+        if env is not None:
+            infos["telemetry_mode_env"] = env
+        tm = (infos["telemetry_mode_base"] & 0b11) | \
+             ((infos["telemetry_mode_loc"] & 0b11) << 2) | \
+             ((infos["telemetry_mode_env"] & 0b11) << 4)
+        cmd = bytes([CMD_SET_OTHER_PARAMS]) + \
+              int(infos.get("manual_add_contacts", False)).to_bytes(1, "little") + \
+              bytes([tm, infos.get("adv_loc_policy", 0),
+                     infos.get("multi_acks", 0)])
+        try:
+            pkt_type, _ = await self._conn.send_command(cmd, [PKT_OK, PKT_ERROR])
+            return {"success": True} if pkt_type == PKT_OK else {"error": "Command failed"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def reboot_node(self) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        try:
+            await self._conn.send_frame(b"\x13reboot")
+            return {"success": True, "message": "Reboot command sent"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def get_stats(self) -> Dict[str, Any]:
+        if not self._conn or not self._conn.is_connected:
+            return {"error": "Not connected"}
+        stats = {}
+        for stype, name in [(0, "core"), (1, "radio"), (2, "packets")]:
+            try:
+                pkt_type, payload = await self._conn.send_command(
+                    bytes([CMD_GET_STATS, stype]), [PKT_STATS, PKT_ERROR])
+                if pkt_type == PKT_STATS:
+                    stats[name] = MeshCoreRawConnection.parse_stats(payload)
+                else:
+                    stats[f"{name}_error"] = payload.hex()
+            except Exception as e:
+                stats[f"{name}_error"] = str(e)
+        return stats
 
 
-# ---------------------------------------------------------------------------
-# Plugin registration hooks
-# ---------------------------------------------------------------------------
+# ── Plugin registration ───────────────────────────────────────────────────
 
-def check_requirements() -> bool:
-    """Check if MeshCore is configured."""
-    host = os.getenv("MESHCORE_HOST", "")
-    return bool(host)
+def check_requirements():
+    return bool(os.getenv("MESHCORE_HOST", ""))
 
-
-def validate_config(config) -> bool:
-    """Validate that the platform config has enough info to connect."""
+def validate_config(config):
     extra = getattr(config, "extra", {}) or {}
-    host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
-    return bool(host)
+    return bool(os.getenv("MESHCORE_HOST") or extra.get("host", ""))
 
-
-def is_connected(config) -> bool:
-    """Check whether MeshCore is configured (env or config.yaml)."""
+def is_connected(config):
     extra = getattr(config, "extra", {}) or {}
-    host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
-    return bool(host)
+    return bool(os.getenv("MESHCORE_HOST") or extra.get("host", ""))
 
-
-def _env_enablement() -> dict | None:
-    """Seed PlatformConfig.extra from env vars during gateway config load."""
+def _env_enablement():
     host = os.getenv("MESHCORE_HOST", "").strip()
     if not host:
         return None
-
-    seed: dict = {"host": host}
-    port = os.getenv("MESHCORE_PORT", "").strip()
-    if port:
-        try:
-            seed["port"] = int(port)
-        except ValueError:
-            pass
-
-    bot_name = os.getenv("MESHCORE_BOT_NAME", "").strip()
-    if bot_name:
-        seed["bot_name"] = bot_name
-
-    admin_nodes = os.getenv("MESHCORE_ADMIN_NODES", "").strip()
-    if admin_nodes:
-        seed["admin_nodes"] = admin_nodes
-
-    channels = os.getenv("MESHCORE_MONITOR_CHANNELS", "").strip()
-    if channels:
-        seed["monitor_channels"] = channels
-
-    enable_dms = os.getenv("MESHCORE_ENABLE_DMS", "").strip()
-    if enable_dms:
-        seed["enable_dms"] = enable_dms
-
-    require_mention = os.getenv("MESHCORE_REQUIRE_MENTION", "").strip()
-    if require_mention:
-        seed["require_mention"] = require_mention
-
-    allowed = os.getenv("MESHCORE_ALLOWED_USERS", "").strip()
-    if allowed:
-        seed["allowed_users"] = allowed
-
-    # Home channel for cron delivery
+    seed = {"host": host}
+    for key in ["MESHCORE_PORT", "MESHCORE_BOT_NAME", "MESHCORE_ADMIN_NODES",
+                "MESHCORE_MONITOR_CHANNELS", "MESHCORE_ENABLE_DMS",
+                "MESHCORE_REQUIRE_MENTION", "MESHCORE_ALLOWED_USERS"]:
+        val = os.getenv(key, "").strip()
+        if val:
+            name = key.replace("MESHCORE_", "").lower()
+            try:
+                seed[name] = int(val)
+            except ValueError:
+                seed[name] = val
     home = os.getenv("MESHCORE_HOME_CHANNEL", "").strip()
     if home:
-        seed["home_channel"] = {
-            "chat_id": f"channel:{home}",
-            "name": f"MeshCore Channel {home}",
-        }
-
+        seed["home_channel"] = {"chat_id": f"channel:{home}", "name": f"MeshCore Channel {home}"}
     return seed
 
-
-def interactive_setup() -> None:
-    """Interactive ``hermes gateway setup`` flow for MeshCore."""
-    from hermes_cli.setup import (
-        prompt,
-        prompt_yes_no,
-        save_env_value,
-        get_env_value,
-        print_header,
-        print_info,
-        print_warning,
-        print_success,
-    )
-
+def interactive_setup():
+    from hermes_cli.setup import (prompt, prompt_yes_no, save_env_value, get_env_value,
+                                   print_header, print_info, print_warning, print_success)
     print_header("MeshCore")
-    existing_host = get_env_value("MESHCORE_HOST")
-    if existing_host:
-        print_info(f"MeshCore: already configured (host: {existing_host})")
-        if not prompt_yes_no("Reconfigure MeshCore?", False):
+    existing = get_env_value("MESHCORE_HOST")
+    if existing:
+        print_info(f"Already configured: {existing}")
+        if not prompt_yes_no("Reconfigure?", False):
             return
-
-    print_info("Connect Hermes to a MeshCore companion radio node via TCP.")
-    print_info("Requires the meshcore_py library: pip install meshcore")
-    print()
-
-    host = prompt("MeshCore node hostname (e.g. mchome)", default=existing_host or "")
+    host = prompt("MeshCore node hostname", default=existing or "")
     if not host:
-        print_warning("Host is required — skipping MeshCore setup")
         return
     save_env_value("MESHCORE_HOST", host.strip())
-
     port = prompt("TCP port", default=get_env_value("MESHCORE_PORT") or "5000")
     if port:
         try:
             save_env_value("MESHCORE_PORT", str(int(port)))
         except ValueError:
-            print_warning(f"Invalid port — using default 5000")
-
-    bot_name = prompt("Bot display name", default=get_env_value("MESHCORE_BOT_NAME") or "Jarvis")
+            pass
+    bot_name = prompt("Bot name", default=get_env_value("MESHCORE_BOT_NAME") or "Jarvis")
     if bot_name:
         save_env_value("MESHCORE_BOT_NAME", bot_name.strip())
-
-    print()
-    print_info("🔒 Access control")
-    print_info("   MeshCore nodes are identified by their public key prefix.")
-    print_info("   Leave allowed users empty to allow anyone to talk to the bot.")
-
-    allow_all = prompt_yes_no("Allow all users?", True)
-    if allow_all:
-        save_env_value("MESHCORE_ALLOW_ALL_USERS", "true")
-        save_env_value("MESHCORE_ALLOWED_USERS", "")
-    else:
-        save_env_value("MESHCORE_ALLOW_ALL_USERS", "false")
-        allowed = prompt(
-            "Allowed pubkey prefixes (comma-separated)",
-            default=get_env_value("MESHCORE_ALLOWED_USERS") or "",
-        )
-        if allowed:
-            save_env_value("MESHCORE_ALLOWED_USERS", allowed.replace(" ", ""))
-
-    print()
-    print_info("🛡️ Admin nodes (full tool access, sensitive info)")
-    admin = prompt(
-        "Admin pubkey prefixes (comma-separated)",
-        default=get_env_value("MESHCORE_ADMIN_NODES") or "",
-    )
+    admin = prompt("Admin pubkey prefixes", default=get_env_value("MESHCORE_ADMIN_NODES") or "")
     if admin:
         save_env_value("MESHCORE_ADMIN_NODES", admin.replace(" ", ""))
-        print_success("Admin nodes configured")
-    else:
-        print_info("No admin nodes — all users get public-only access")
-
-    print()
-    print_info("📡 Channel monitoring")
-    print_info("   Leave empty to discover all channels (respond to none until enabled).")
-    print_info("   Enter comma-separated channel indexes to monitor specific channels.")
-    channels = prompt(
-        "Channel indexes to monitor (e.g. 1,3,5)",
-        default=get_env_value("MESHCORE_MONITOR_CHANNELS") or "",
-    )
+    channels = prompt("Monitor channel indexes", default=get_env_value("MESHCORE_MONITOR_CHANNELS") or "")
     if channels:
         save_env_value("MESHCORE_MONITOR_CHANNELS", channels.replace(" ", ""))
-
-    require_mention = prompt_yes_no("Require @bot-name mention in channels?", True)
-    save_env_value("MESHCORE_REQUIRE_MENTION", "true" if require_mention else "false")
-
-    print()
-    print_info("💬 Direct messages")
-    enable_dms = prompt_yes_no("Respond to direct messages?", True)
-    save_env_value("MESHCORE_ENABLE_DMS", "true" if enable_dms else "false")
-
-    print()
-    print_success("MeshCore configuration saved to ~/.hermes/.env")
-    print_info("Restart the gateway for changes to take effect: hermes gateway restart")
-
+    save_env_value("MESHCORE_REQUIRE_MENTION", "true" if prompt_yes_no("Require @mention?", True) else "false")
+    save_env_value("MESHCORE_ENABLE_DMS", "true" if prompt_yes_no("Enable DMs?", True) else "false")
+    print_success("Saved to ~/.hermes/.env")
 
 def register(ctx):
-    """Plugin entry point: called by the Hermes plugin system."""
     ctx.register_platform(
-        name="meshcore",
-        label="MeshCore",
+        name="meshcore", label="MeshCore",
         adapter_factory=lambda cfg: MeshCoreAdapter(cfg),
-        check_fn=check_requirements,
-        validate_config=validate_config,
-        is_connected=is_connected,
-        required_env=["MESHCORE_HOST"],
-        install_hint="pip install meshcore",
-        setup_fn=interactive_setup,
+        check_fn=check_requirements, validate_config=validate_config,
+        is_connected=is_connected, required_env=["MESHCORE_HOST"],
+        install_hint="pip install meshcore", setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="MESHCORE_HOME_CHANNEL",
         allowed_users_env="MESHCORE_ALLOWED_USERS",
         allow_all_env="MESHCORE_ALLOW_ALL_USERS",
-        max_message_length=400,
-        emoji="📡",
-        pii_safe=True,
-        allow_update_command=True,
+        max_message_length=400, emoji="📡", pii_safe=True, allow_update_command=True,
         platform_hint=(
-            "You are chatting via MeshCore — a low-bandwidth mesh radio network. "
-            "Keep responses concise (under 400 characters). "
-            "Messages are sent over radio packets — avoid markdown, use plain text. "
-            "The sender's node ID (pubkey_prefix) is available for authorization. "
-            "Some users are 'admin' nodes with full access; others are 'public' with "
-            "limited access. Do not share sensitive infrastructure details, "
-            "credentials, or execute privileged commands for public users."
+            "MeshCore LoRa mesh: 150 char packets, auto-split for longer. "
+            "Plain text only. Admin nodes get full access; public users restricted. "
+            "Never share credentials or sensitive data in public channels."
         ),
     )
