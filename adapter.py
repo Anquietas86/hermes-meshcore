@@ -7,14 +7,14 @@ Uses the ``meshcore_py`` library for the MeshCore protocol.
 
 Configuration via environment variables (or config.yaml extra)::
 
-    MESHORE_HOST=mchome
-    MESHORE_PORT=5000
-    MESHORE_BOT_NAME=Jarvis
-    MESHORE_ADMIN_NODES=abc123,def456
-    MESHORE_MONITOR_CHANNELS=1,3,5   (empty = discover all, respond to none)
-    MESHORE_ENABLE_DMS=true
-    MESHORE_REQUIRE_MENTION=true
-    MESHORE_ALLOWED_USERS=            (empty = allow all)
+    MESHCORE_HOST=mchome
+    MESHCORE_PORT=5000
+    MESHCORE_BOT_NAME=Jarvis
+    MESHCORE_ADMIN_NODES=abc123,def456
+    MESHCORE_MONITOR_CHANNELS=1,3,5   (empty = discover all, respond to none)
+    MESHCORE_ENABLE_DMS=true
+    MESHCORE_REQUIRE_MENTION=true
+    MESHCORE_ALLOWED_USERS=            (empty = allow all)
 """
 
 import asyncio
@@ -55,18 +55,18 @@ class MeshCoreAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", {}) or {}
 
         # Connection settings
-        self.host = os.getenv("MESHORE_HOST") or extra.get("host", "")
-        self.port = int(os.getenv("MESHORE_PORT") or extra.get("port", 5000))
-        self.bot_name = os.getenv("MESHORE_BOT_NAME") or extra.get("bot_name", "Jarvis")
+        self.host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
+        self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
+        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "Jarvis")
 
         # Auth — node ID based
-        admin_raw = os.getenv("MESHORE_ADMIN_NODES") or extra.get("admin_nodes", "")
+        admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
         self.admin_nodes: Set[str] = {
             n.strip() for n in admin_raw.split(",") if n.strip()
         }
 
         # Channel monitoring
-        channels_raw = os.getenv("MESHORE_MONITOR_CHANNELS") or extra.get("monitor_channels", "")
+        channels_raw = os.getenv("MESHCORE_MONITOR_CHANNELS") or extra.get("monitor_channels", "")
         self.monitor_channels: Optional[Set[int]] = None
         if channels_raw.strip():
             self.monitor_channels = {
@@ -74,21 +74,21 @@ class MeshCoreAdapter(BasePlatformAdapter):
             }
 
         # DM support
-        enable_dms = os.getenv("MESHORE_ENABLE_DMS") or extra.get("enable_dms", "true")
+        enable_dms = os.getenv("MESHCORE_ENABLE_DMS") or extra.get("enable_dms", "true")
         self.enable_dms = enable_dms.lower() in {"1", "true", "yes"}
 
         # Channel mention requirement
-        require_mention = os.getenv("MESHORE_REQUIRE_MENTION") or extra.get("require_mention", "true")
+        require_mention = os.getenv("MESHCORE_REQUIRE_MENTION") or extra.get("require_mention", "true")
         self.require_mention = require_mention.lower() in {"1", "true", "yes"}
 
         # Admin channels — channels trusted for admin-level replies
-        admin_channels_raw = os.getenv("MESHORE_ADMIN_CHANNELS") or extra.get("admin_channels", "")
+        admin_channels_raw = os.getenv("MESHCORE_ADMIN_CHANNELS") or extra.get("admin_channels", "")
         self.admin_channels: Set[int] = {
             int(c.strip()) for c in admin_channels_raw.split(",") if c.strip().isdigit()
         }
 
         # User allowlist
-        allowed_raw = os.getenv("MESHORE_ALLOWED_USERS") or extra.get("allowed_users", "")
+        allowed_raw = os.getenv("MESHCORE_ALLOWED_USERS") or extra.get("allowed_users", "")
         self.allowed_users: Set[str] = {
             u.strip() for u in allowed_raw.split(",") if u.strip()
         }
@@ -101,7 +101,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._path_hash_size: int = 1  # Default 1-byte, updated on connect
         self._last_message_time: float = 0.0  # For silence watchdog
         self._watchdog_task: Optional[asyncio.Task] = None
-        self._keepalive_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
 
     @property
@@ -113,10 +112,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def connect(self) -> bool:
         """Connect to the MeshCore node via TCP and subscribe to events."""
         if not self.host:
-            logger.error("MeshCore: MESHORE_HOST must be configured")
+            logger.error("MeshCore: MESHCORE_HOST must be configured")
             self._set_fatal_error(
                 "config_missing",
-                "MESHORE_HOST must be set",
+                "MESHCORE_HOST must be set",
                 retryable=False,
             )
             return False
@@ -699,25 +698,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
         """Check if a command result is successful, treating None as failure."""
         return result is not None and not result.is_error()
 
-    async def _keepalive_ping(self) -> None:
-        """Send periodic pings to prevent the node's TCP idle timeout (~120s).
-
-        Runs every 90s — well under the suspected 120s timeout. If the ping
-        fails, the silence watchdog will detect the stall and reconnect.
-        """
-        while self._mc is not None:
-            await asyncio.sleep(90)
-            if self._mc is None:
-                return
-            try:
-                result = await self._mc.commands.get_bat()
-                if self._safe_result(result):
-                    logger.debug("MeshCore: keepalive ping OK (bat=%s)", result.payload)
-                else:
-                    logger.warning("MeshCore: keepalive ping failed — connection may be stale")
-            except Exception as e:
-                logger.warning("MeshCore: keepalive ping error: %s", e)
-
     async def _silence_watchdog(self) -> None:
         """Watch for message silence and auto-reconnect if the connection stalls.
 
@@ -758,19 +738,20 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return  # connect() restarts the watchdog if successful
 
     def _start_watchdogs(self) -> None:
-        """Start keepalive and silence watchdog background tasks."""
-        if self._keepalive_task is None or self._keepalive_task.done():
-            self._keepalive_task = asyncio.create_task(self._keepalive_ping())
+        """Start silence watchdog background task.
+        
+        The poll loop (get_msg every 2s) doubles as a keepalive — no
+        separate ping needed.
+        """
         if self._watchdog_task is None or self._watchdog_task.done():
             self._last_message_time = time.time()
             self._watchdog_task = asyncio.create_task(self._silence_watchdog())
 
     def _stop_watchdogs(self) -> None:
         """Cancel watchdog and poll background tasks."""
-        for task in (self._keepalive_task, self._watchdog_task, self._poll_task):
+        for task in (self._watchdog_task, self._poll_task):
             if task and not task.done():
                 task.cancel()
-        self._keepalive_task = None
         self._watchdog_task = None
         self._poll_task = None
 
@@ -913,64 +894,64 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
 def check_requirements() -> bool:
     """Check if MeshCore is configured."""
-    host = os.getenv("MESHORE_HOST", "")
+    host = os.getenv("MESHCORE_HOST", "")
     return bool(host)
 
 
 def validate_config(config) -> bool:
     """Validate that the platform config has enough info to connect."""
     extra = getattr(config, "extra", {}) or {}
-    host = os.getenv("MESHORE_HOST") or extra.get("host", "")
+    host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
     return bool(host)
 
 
 def is_connected(config) -> bool:
     """Check whether MeshCore is configured (env or config.yaml)."""
     extra = getattr(config, "extra", {}) or {}
-    host = os.getenv("MESHORE_HOST") or extra.get("host", "")
+    host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
     return bool(host)
 
 
 def _env_enablement() -> dict | None:
     """Seed PlatformConfig.extra from env vars during gateway config load."""
-    host = os.getenv("MESHORE_HOST", "").strip()
+    host = os.getenv("MESHCORE_HOST", "").strip()
     if not host:
         return None
 
     seed: dict = {"host": host}
-    port = os.getenv("MESHORE_PORT", "").strip()
+    port = os.getenv("MESHCORE_PORT", "").strip()
     if port:
         try:
             seed["port"] = int(port)
         except ValueError:
             pass
 
-    bot_name = os.getenv("MESHORE_BOT_NAME", "").strip()
+    bot_name = os.getenv("MESHCORE_BOT_NAME", "").strip()
     if bot_name:
         seed["bot_name"] = bot_name
 
-    admin_nodes = os.getenv("MESHORE_ADMIN_NODES", "").strip()
+    admin_nodes = os.getenv("MESHCORE_ADMIN_NODES", "").strip()
     if admin_nodes:
         seed["admin_nodes"] = admin_nodes
 
-    channels = os.getenv("MESHORE_MONITOR_CHANNELS", "").strip()
+    channels = os.getenv("MESHCORE_MONITOR_CHANNELS", "").strip()
     if channels:
         seed["monitor_channels"] = channels
 
-    enable_dms = os.getenv("MESHORE_ENABLE_DMS", "").strip()
+    enable_dms = os.getenv("MESHCORE_ENABLE_DMS", "").strip()
     if enable_dms:
         seed["enable_dms"] = enable_dms
 
-    require_mention = os.getenv("MESHORE_REQUIRE_MENTION", "").strip()
+    require_mention = os.getenv("MESHCORE_REQUIRE_MENTION", "").strip()
     if require_mention:
         seed["require_mention"] = require_mention
 
-    allowed = os.getenv("MESHORE_ALLOWED_USERS", "").strip()
+    allowed = os.getenv("MESHCORE_ALLOWED_USERS", "").strip()
     if allowed:
         seed["allowed_users"] = allowed
 
     # Home channel for cron delivery
-    home = os.getenv("MESHORE_HOME_CHANNEL", "").strip()
+    home = os.getenv("MESHCORE_HOME_CHANNEL", "").strip()
     if home:
         seed["home_channel"] = {
             "chat_id": f"channel:{home}",
@@ -994,7 +975,7 @@ def interactive_setup() -> None:
     )
 
     print_header("MeshCore")
-    existing_host = get_env_value("MESHORE_HOST")
+    existing_host = get_env_value("MESHCORE_HOST")
     if existing_host:
         print_info(f"MeshCore: already configured (host: {existing_host})")
         if not prompt_yes_no("Reconfigure MeshCore?", False):
@@ -1008,18 +989,18 @@ def interactive_setup() -> None:
     if not host:
         print_warning("Host is required — skipping MeshCore setup")
         return
-    save_env_value("MESHORE_HOST", host.strip())
+    save_env_value("MESHCORE_HOST", host.strip())
 
-    port = prompt("TCP port", default=get_env_value("MESHORE_PORT") or "5000")
+    port = prompt("TCP port", default=get_env_value("MESHCORE_PORT") or "5000")
     if port:
         try:
-            save_env_value("MESHORE_PORT", str(int(port)))
+            save_env_value("MESHCORE_PORT", str(int(port)))
         except ValueError:
             print_warning(f"Invalid port — using default 5000")
 
-    bot_name = prompt("Bot display name", default=get_env_value("MESHORE_BOT_NAME") or "Jarvis")
+    bot_name = prompt("Bot display name", default=get_env_value("MESHCORE_BOT_NAME") or "Jarvis")
     if bot_name:
-        save_env_value("MESHORE_BOT_NAME", bot_name.strip())
+        save_env_value("MESHCORE_BOT_NAME", bot_name.strip())
 
     print()
     print_info("🔒 Access control")
@@ -1028,25 +1009,25 @@ def interactive_setup() -> None:
 
     allow_all = prompt_yes_no("Allow all users?", True)
     if allow_all:
-        save_env_value("MESHORE_ALLOW_ALL_USERS", "true")
-        save_env_value("MESHORE_ALLOWED_USERS", "")
+        save_env_value("MESHCORE_ALLOW_ALL_USERS", "true")
+        save_env_value("MESHCORE_ALLOWED_USERS", "")
     else:
-        save_env_value("MESHORE_ALLOW_ALL_USERS", "false")
+        save_env_value("MESHCORE_ALLOW_ALL_USERS", "false")
         allowed = prompt(
             "Allowed pubkey prefixes (comma-separated)",
-            default=get_env_value("MESHORE_ALLOWED_USERS") or "",
+            default=get_env_value("MESHCORE_ALLOWED_USERS") or "",
         )
         if allowed:
-            save_env_value("MESHORE_ALLOWED_USERS", allowed.replace(" ", ""))
+            save_env_value("MESHCORE_ALLOWED_USERS", allowed.replace(" ", ""))
 
     print()
     print_info("🛡️ Admin nodes (full tool access, sensitive info)")
     admin = prompt(
         "Admin pubkey prefixes (comma-separated)",
-        default=get_env_value("MESHORE_ADMIN_NODES") or "",
+        default=get_env_value("MESHCORE_ADMIN_NODES") or "",
     )
     if admin:
-        save_env_value("MESHORE_ADMIN_NODES", admin.replace(" ", ""))
+        save_env_value("MESHCORE_ADMIN_NODES", admin.replace(" ", ""))
         print_success("Admin nodes configured")
     else:
         print_info("No admin nodes — all users get public-only access")
@@ -1057,18 +1038,18 @@ def interactive_setup() -> None:
     print_info("   Enter comma-separated channel indexes to monitor specific channels.")
     channels = prompt(
         "Channel indexes to monitor (e.g. 1,3,5)",
-        default=get_env_value("MESHORE_MONITOR_CHANNELS") or "",
+        default=get_env_value("MESHCORE_MONITOR_CHANNELS") or "",
     )
     if channels:
-        save_env_value("MESHORE_MONITOR_CHANNELS", channels.replace(" ", ""))
+        save_env_value("MESHCORE_MONITOR_CHANNELS", channels.replace(" ", ""))
 
     require_mention = prompt_yes_no("Require @bot-name mention in channels?", True)
-    save_env_value("MESHORE_REQUIRE_MENTION", "true" if require_mention else "false")
+    save_env_value("MESHCORE_REQUIRE_MENTION", "true" if require_mention else "false")
 
     print()
     print_info("💬 Direct messages")
     enable_dms = prompt_yes_no("Respond to direct messages?", True)
-    save_env_value("MESHORE_ENABLE_DMS", "true" if enable_dms else "false")
+    save_env_value("MESHCORE_ENABLE_DMS", "true" if enable_dms else "false")
 
     print()
     print_success("MeshCore configuration saved to ~/.hermes/.env")
@@ -1084,13 +1065,13 @@ def register(ctx):
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["MESHORE_HOST"],
+        required_env=["MESHCORE_HOST"],
         install_hint="pip install meshcore",
         setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
-        cron_deliver_env_var="MESHORE_HOME_CHANNEL",
-        allowed_users_env="MESHORE_ALLOWED_USERS",
-        allow_all_env="MESHORE_ALLOW_ALL_USERS",
+        cron_deliver_env_var="MESHCORE_HOME_CHANNEL",
+        allowed_users_env="MESHCORE_ALLOWED_USERS",
+        allow_all_env="MESHCORE_ALLOW_ALL_USERS",
         max_message_length=400,
         emoji="📡",
         pii_safe=True,
