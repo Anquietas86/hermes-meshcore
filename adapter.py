@@ -207,6 +207,43 @@ class MeshCoreRawConnection:
                 await self._handle_unsolicited(pkt_type, payload)
             return PKT_ERROR, b"\x01"  # timeout → generic error
 
+    async def send_and_wait_ack(self, cmd_bytes: bytes,
+                                 timeout: float = 15.0) -> Tuple[int, bytes]:
+        """Send a command, get MSG_SENT, then hold the lock and wait for
+        the matching ACK. Returns (PKT_OK, b'') on success or
+        (PKT_ERROR, reason_bytes) on failure.
+
+        The lock is held for the ENTIRE send+ACK cycle — no other command
+        (poll, keepalive, another send) can steal the ACK frame.
+        """
+        async with self._cmd_lock:
+            await self.send_frame(cmd_bytes)
+            deadline = time.time() + timeout
+            # Phase 1: wait for MSG_SENT
+            while time.time() < deadline:
+                pkt_type, payload = await self.read_frame()
+                if pkt_type == PKT_MSG_SENT:
+                    sent = self.parse_msg_sent(payload)
+                    exp_ack = sent["expected_ack"]
+                    ack_timeout = max(sent["suggested_timeout"] / 1000 * 1.2, 5.0)
+                    ack_deadline = time.time() + ack_timeout
+                    # Phase 2: wait for matching ACK (still holding lock)
+                    while time.time() < ack_deadline:
+                        pkt_type, payload = await self.read_frame()
+                        if pkt_type == PKT_ACK:
+                            ack_code = payload.hex() if payload else ""
+                            if ack_code == exp_ack:
+                                return PKT_OK, b""
+                        elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                                          PKT_CHANNEL_MSG_RECV, PKT_CHANNEL_MSG_RECV_V3):
+                            await self._handle_unsolicited(pkt_type, payload)
+                    return PKT_ERROR, b"no_ack_received"
+                elif pkt_type == PKT_ERROR:
+                    return PKT_ERROR, payload
+                else:
+                    await self._handle_unsolicited(pkt_type, payload)
+            return PKT_ERROR, b"timeout"
+
     async def _handle_unsolicited(self, pkt_type: int, payload: bytes) -> None:
         """Handle unsolicited messages that arrive during command waits.
 
@@ -356,12 +393,15 @@ class MeshCoreRawConnection:
 
     @staticmethod
     def parse_channel_info(payload: bytes) -> dict:
-        """Parse CHANNEL_INFO (0x12) response."""
+        """Parse CHANNEL_INFO (0x12) response.
+
+        Format: 1-byte channel_idx + 32-byte name (null-padded) + 16-byte secret.
+        """
         buf = io.BytesIO(payload)
         info = {"channel_idx": buf.read(1)[0]}
-        # Channel name follows (variable length, null-terminated or to end)
-        remaining = buf.read()
-        info["channel_name"] = remaining.decode("utf-8", "ignore").replace("\x00", "")
+        # Read exactly 32 bytes for the name, strip nulls
+        name_bytes = buf.read(32)
+        info["channel_name"] = name_bytes.decode("utf-8", "ignore").replace("\x00", "")
         return info
 
     @staticmethod
@@ -764,7 +804,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
         """Send a DM with retry and ACK waiting. Returns None on success."""
         contact = self._contacts.get(pubkey_prefix)
         if contact is None:
-            # Try prefix match
             prefix_lower = pubkey_prefix.lower()
             for cid, c in self._contacts.items():
                 if cid.lower().startswith(prefix_lower):
@@ -781,7 +820,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         for attempt in range(max_attempts):
             if attempt == 2 and not flood:
-                # Reset path to flood
                 try:
                     await self._conn.send_command(
                         b"\x0D" + bytes.fromhex(contact["public_key"])[:32],
@@ -793,33 +831,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
             cmd = bytes([CMD_SEND_TXT_MSG, 0x00, attempt]) + \
                   timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
             try:
-                pkt_type, payload = await self._conn.send_command(
-                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                if pkt_type == PKT_ERROR:
-                    if flood:
-                        flood_attempts += 1
-                    continue
-
-                sent = MeshCoreRawConnection.parse_msg_sent(payload)
-                exp_ack = sent["expected_ack"]
-                timeout_s = sent["suggested_timeout"] / 1000 * 1.2
-
-                # Wait for ACK
-                deadline = time.time() + max(timeout_s, 5.0)
-                while time.time() < deadline:
-                    ack_type, ack_payload = await self._conn.read_frame()
-                    if ack_type == PKT_ACK:
-                        ack_code = ack_payload.hex() if ack_payload else ""
-                        if ack_code == exp_ack:
-                            return None
-                    elif ack_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
-                                      PKT_CHANNEL_MSG_RECV, PKT_CHANNEL_MSG_RECV_V3):
-                        await self._route_unsolicited(ack_type, ack_payload)
-                # ACK timeout — retry
+                pkt_type, payload = await self._conn.send_and_wait_ack(cmd, timeout=15.0)
+                if pkt_type == PKT_OK:
+                    return None
+                if flood:
+                    flood_attempts += 1
             except Exception:
-                pass
-            if flood:
-                flood_attempts += 1
+                if flood:
+                    flood_attempts += 1
         return "no_ack_received"
 
     @staticmethod
