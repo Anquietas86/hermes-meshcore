@@ -99,6 +99,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._discovered_channels: Set[int] = set()
         self._contacts: Dict[str, Any] = {}
         self._path_hash_size: int = 1  # Default 1-byte, updated on connect
+        self._health_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
@@ -213,10 +214,18 @@ class MeshCoreAdapter(BasePlatformAdapter):
             f" {sorted(self.monitor_channels) if self.monitor_channels else '(discovery mode)'}",
             "enabled" if self.enable_dms else "disabled",
         )
+
+        # Start health check — pings the node every 60s, reconnects if stale
+        self._health_task = asyncio.create_task(self._health_check_loop())
         return True
 
     async def disconnect(self) -> None:
         """Disconnect from the MeshCore node."""
+        # Cancel health check loop
+        if self._health_task:
+            self._health_task.cancel()
+            self._health_task = None
+
         self._mark_disconnected()
 
         if self._mc:
@@ -241,6 +250,35 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self._contacts.clear()
         self._discovered_channels.clear()
+
+    async def _health_check_loop(self) -> None:
+        """Ping the node every 60s. If it stops responding, disconnect so
+        the gateway's auto-reconnect mechanism kicks in."""
+        while True:
+            await asyncio.sleep(60)
+            if not self._mc:
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self._mc.commands.send_device_query(), timeout=10
+                )
+                if result.is_error():
+                    logger.warning("MeshCore: health ping failed: %s — reconnecting",
+                                   result.payload)
+                    await self.disconnect()
+                    return
+                logger.debug("MeshCore: health ping OK (battery=%dmV)",
+                            result.payload.get("battery_mv", "?"))
+            except asyncio.TimeoutError:
+                logger.warning("MeshCore: health ping timed out — reconnecting")
+                await self.disconnect()
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning("MeshCore: health ping error: %s — reconnecting", e)
+                await self.disconnect()
+                return
 
     # ── Node management (admin-only runtime operations) ───────────────────
 
