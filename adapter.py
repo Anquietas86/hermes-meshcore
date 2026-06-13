@@ -102,6 +102,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._last_message_time: float = 0.0  # For silence watchdog
         self._watchdog_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._cmd_lock: asyncio.Lock = None  # Lazy-init in connect()
 
     @property
     def name(self) -> str:
@@ -138,6 +139,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
             logger.error("MeshCore: failed to connect to %s:%s — %s", self.host, self.port, e)
             self._set_fatal_error("connect_failed", str(e), retryable=True)
             return False
+
+        # Init command lock — serializes all TCP commands so poll and send
+        # don't race on the shared command channel.
+        self._cmd_lock = asyncio.Lock()
 
         # Load contacts and trigger exchange
         try:
@@ -462,46 +467,49 @@ class MeshCoreAdapter(BasePlatformAdapter):
         message_ids = []
         errors = []
 
-        for i, chunk in enumerate(chunks):
-            try:
-                if chat_id.startswith("channel:"):
-                    channel_idx = int(chat_id.split(":", 1)[1])
-                    # send_chan_msg has no built-in retry — add our own.
-                    # It can return None when the node is busy, so treat
-                    # None as a transient failure and retry.
-                    result = None
-                    for attempt in range(3):
-                        result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
-                        if result is not None and not result.is_error():
-                            break
-                        logger.debug("MeshCore: chan send attempt %d failed: %s",
-                                     attempt + 1,
-                                     result.payload if result else "None")
-                        await asyncio.sleep(1.0)
-                elif chat_id.startswith("dm:"):
-                    pubkey_prefix = chat_id.split(":", 1)[1]
-                    contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
-                    if contact is None:
-                        return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
-                    result = await self._mc.commands.send_msg_with_retry(
-                        contact, chunk, max_attempts=3
-                    )
-                else:
-                    return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
+        # Serialize all sends with the command lock — prevents poll's
+        # get_msg() from stealing send responses on the shared TCP channel.
+        async with self._cmd_lock:
+            for i, chunk in enumerate(chunks):
+                try:
+                    if chat_id.startswith("channel:"):
+                        channel_idx = int(chat_id.split(":", 1)[1])
+                        # send_chan_msg has no built-in retry — add our own.
+                        # It can return None when the node is busy, so treat
+                        # None as a transient failure and retry.
+                        result = None
+                        for attempt in range(3):
+                            result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                            if result is not None and not result.is_error():
+                                break
+                            logger.debug("MeshCore: chan send attempt %d failed: %s",
+                                         attempt + 1,
+                                         result.payload if result else "None")
+                            await asyncio.sleep(1.0)
+                    elif chat_id.startswith("dm:"):
+                        pubkey_prefix = chat_id.split(":", 1)[1]
+                        contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
+                        if contact is None:
+                            return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
+                        result = await self._mc.commands.send_msg_with_retry(
+                            contact, chunk, max_attempts=3
+                        )
+                    else:
+                        return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-                if result is None:
-                    errors.append(f"chunk {i+1}: send returned None (node busy)")
-                elif result.is_error():
-                    errors.append(f"chunk {i+1}: {result.payload}")
-                else:
-                    message_ids.append(str(int(time.time() * 1000)))
+                    if result is None:
+                        errors.append(f"chunk {i+1}: send returned None (node busy)")
+                    elif result.is_error():
+                        errors.append(f"chunk {i+1}: {result.payload}")
+                    else:
+                        message_ids.append(str(int(time.time() * 1000)))
 
-                # Small delay between chunks to avoid flooding the mesh
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+                    # Small delay between chunks to avoid flooding the mesh
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.5)
 
-            except Exception as e:
-                errors.append(f"chunk {i+1}: {e}")
+                except Exception as e:
+                    errors.append(f"chunk {i+1}: {e}")
 
         if errors and not message_ids:
             return SendResult(success=False, error="; ".join(errors))
@@ -771,10 +779,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
         """Poll for new messages every 2 seconds."""
         while self._mc is not None:
             try:
-                # get_msg() returns None if no messages waiting, or a list
-                # of message dicts. The meshcore_py dispatcher routes them
-                # to our subscribed handlers.
-                await self._mc.commands.get_msg()
+                # Serialize with sends — get_msg() and send_msg share the
+                # same TCP command channel. Without a lock, a poll response
+                # can arrive mid-send and steal the send's event.
+                async with self._cmd_lock:
+                    await self._mc.commands.get_msg()
             except Exception as e:
                 logger.debug("MeshCore: poll error (non-fatal): %s", e)
             await asyncio.sleep(2.0)
