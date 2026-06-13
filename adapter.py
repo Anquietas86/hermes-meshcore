@@ -480,7 +480,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-                if result.is_error():
+                if result is None:
+                    errors.append(f"chunk {i+1}: send returned None (node busy)")
+                elif result.is_error():
                     errors.append(f"chunk {i+1}: {result.payload}")
                 else:
                     message_ids.append(str(int(time.time() * 1000)))
