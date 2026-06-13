@@ -515,9 +515,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
                             await asyncio.sleep(1.0)
                     elif chat_id.startswith("dm:"):
                         pubkey_prefix = chat_id.split(":", 1)[1]
-                        contact = send_mc.get_contact_by_key_prefix(pubkey_prefix)
+                        # Look up contact from main connection's cache
+                        contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
                         if contact is None:
                             return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
+                        # Send via fresh connection
                         result = await send_mc.commands.send_msg_with_retry(
                             contact, chunk, max_attempts=3
                         )
