@@ -357,9 +357,13 @@ class MeshCoreRawConnection:
         if plen == 255:
             msg["path_hash_mode"] = -1
             msg["path_len"] = 255
+            msg["path"] = ""
         else:
             msg["path_hash_mode"] = plen >> 6
             msg["path_len"] = plen & 0x3F
+            path_hash_size = 1 << msg["path_hash_mode"]
+            path_bytes = buf.read(msg["path_len"] * path_hash_size)
+            msg["path"] = path_bytes.hex()
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little")
         if msg["txt_type"] == 2:
@@ -984,6 +988,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             text=user_prompt, chat_id=f"dm:{pubkey_prefix}", chat_type="dm",
             user_id=pubkey_prefix, user_name=sender_name,
             is_admin=pubkey_prefix in self.admin_nodes,
+            metadata={"snr": msg.get("SNR"), "path_len": msg.get("path_len"),
+                      "path": msg.get("path"),
+                      "sender_timestamp": msg.get("sender_timestamp")},
         )
 
     async def _dispatch_message(self, text, chat_id, chat_type, user_id, user_name,
