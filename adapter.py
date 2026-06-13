@@ -471,7 +471,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return SendResult(
             success=True,
             message_id=message_ids[0] if message_ids else "",
-            metadata={"chunks_sent": len(message_ids), "chunks_total": len(chunks)},
+            continuation_message_ids=tuple(message_ids[1:]) if len(message_ids) > 1 else (),
         )
 
     @staticmethod
