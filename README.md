@@ -4,22 +4,27 @@ Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to a
 [MeshCore](https://meshcore.net/) companion radio node via TCP, enabling
 LoRa mesh communication as a native messaging platform.
 
+Uses the **raw binary protocol** directly — zero external dependencies beyond
+Python's standard library. No `meshcore_py` required.
+
 ## Features
 
 - **Channel monitoring** — respond in mesh channels with @mention detection
-- **Direct messages** — private conversations with ACK-guaranteed delivery
+- **Direct messages** — private conversations with fire-and-forget delivery
 - **Node-ID authorization** — admin nodes get full access, public users are restricted
-- **150-char enforcement** — respects official MeshCore app message limits
+- **Message splitting** — auto-splits long responses at word boundaries with (N/M) markers
 - **Security-aware** — warns the model not to leak credentials in public broadcasts
 - **Admin channels** — mark trusted channels for sensitive replies
+- **Radio metadata** — RSSI, SNR, hops, and path info injected into channel context
+- **Self-healing** — silence watchdog with automatic reconnect, stale frame drain
 
 ## Quick Install
 
 ```bash
-hermes plugins install anquietas/hermes-meshcore
+hermes plugins install Anquietas86/hermes-meshcore
 ```
 
-Or from the dashboard: Plugins → Install → enter `anquietas/hermes-meshcore`.
+Or from the dashboard: Plugins → Install → enter `Anquietas86/hermes-meshcore`.
 
 ## Configuration
 
@@ -69,7 +74,7 @@ hermes config set approvals.mode off
 
 - Hermes Agent (latest)
 - MeshCore companion radio node accessible via TCP
-- `meshcore_py` Python library (auto-installed)
+- Python 3.11+ (stdlib only — no external dependencies)
 - `git` for plugin installation
 
 ## License
