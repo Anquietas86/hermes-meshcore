@@ -888,6 +888,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     return SendResult(success=False, error=f"Invalid chat_id: {chat_id}")
 
+                # On first failure, reconnect and retry once
+                if result is not True and i == 0:
+                    logger.warning("MeshCore: send failed, reconnecting and retrying")
+                    await self._reconnect()
+                    if chat_id.startswith("channel:"):
+                        channel_idx = int(chat_id.split(":", 1)[1])
+                        result = await self._send_channel_msg(channel_idx, chunk)
+                    elif chat_id.startswith("dm:"):
+                        pubkey_prefix = chat_id.split(":", 1)[1]
+                        result = await self._send_dm(pubkey_prefix, chunk)
+
                 if result is True:
                     message_ids.append(str(int(time.time() * 1000)))
                 elif isinstance(result, str):
