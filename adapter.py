@@ -920,8 +920,14 @@ class MeshCoreAdapter(BasePlatformAdapter):
             user_prompt = user_prompt.strip()
 
         if self.require_mention:
-            patterns = [f"@{self.bot_name}", f"@{self.bot_name.lower()}",
-                        self.bot_name + ":", self.bot_name.lower() + ":"]
+            # MeshCore app sends mentions as @[Full Node Name] (bracketed)
+            # Also match plain @Jarvis and Jarvis: prefixes
+            node_name = self._self_info.get("name", "") if self._self_info else ""
+            patterns = [
+                f"@[{node_name}]", f"@[{node_name.lower()}]",
+                f"@{self.bot_name}", f"@{self.bot_name.lower()}",
+                self.bot_name + ":", self.bot_name.lower() + ":",
+            ]
             for p in patterns:
                 if user_prompt.lower().startswith(p.lower()):
                     user_prompt = user_prompt[len(p):].strip()
