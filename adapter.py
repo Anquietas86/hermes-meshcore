@@ -709,7 +709,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         )
 
         # Inject radio metadata into the platform context so the model
-        # can reference signal strength, hop count, etc. in replies.
+        # can reference signal strength, hop count, path, etc. in replies.
         if metadata:
             radio_parts = []
             if metadata.get("rssi") is not None:
@@ -718,11 +718,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 radio_parts.append(f"SNR={metadata['snr']}dB")
             if metadata.get("path_len") is not None:
                 radio_parts.append(f"hops={metadata['path_len']}")
+            if metadata.get("path") is not None:
+                radio_parts.append(f"path={metadata['path']}")
             if radio_parts:
                 platform_context += (
                     "RADIO METADATA for this message: "
                     + ", ".join(radio_parts)
-                    + ". You can use this in your reply if asked about signal quality."
+                    + ". The path is the hex-encoded route the packet took "
+                    + "through the mesh (each byte = one hop hash). "
+                    + "You can use this data if asked about signal quality "
+                    + "or mesh routing."
                 )
 
         event = MessageEvent(
