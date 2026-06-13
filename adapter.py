@@ -436,7 +436,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         # Add chunk markers for multi-packet messages so the receiver
         # knows they're part of a sequence and nothing is missing.
         # Split directly at marker-aware size in ONE pass — no re-splitting.
-        # Reserve 13 chars for "(99/99) " + " ..." (worst-case prefix/suffix).
+        # Reserve 13 chars for " ..." + " (99/99)" (worst-case suffix/marker).
         if len(raw_chunks) > 1:
             # Re-split the full text at 137 chars (150 - 13) so every chunk
             # fits its marker without a second pass.
@@ -444,9 +444,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             total = len(marker_aware)
             chunks = []
             for i, chunk in enumerate(marker_aware):
-                prefix = f"({i+1}/{total}) "
                 suffix = " ..." if i < total - 1 else ""
-                chunks.append(prefix + chunk + suffix)
+                marker = f" ({i+1}/{total})"
+                chunks.append(chunk + suffix + marker)
         else:
             chunks = raw_chunks
 
