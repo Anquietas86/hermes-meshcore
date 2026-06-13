@@ -19,7 +19,7 @@ requires_env:
     password: false
 optional_env:
   - name: MESHCORE_BOT_NAME
-    description: "Name the bot uses when replying (default: Jarvis)"
+    description: "Override bot name for @mention matching (auto-derived from node name if unset)"
     prompt: "Bot display name"
     password: false
   - name: MESHCORE_ADMIN_NODES

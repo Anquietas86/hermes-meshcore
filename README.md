@@ -43,11 +43,11 @@ MESHCORE_ENABLE_DMS=true
 
 # Optional
 MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
-MESHCORE_REQUIRE_MENTION=true         # Only respond to @Jarvis in channels
+MESHCORE_REQUIRE_MENTION=true         # Only respond to @mention in channels
 ```
 
 The bot name for @mention detection is auto-derived from your node's advert
-name (set via `hermes meshcore set-name "Jarvis"`). `MESHCORE_BOT_NAME` is
+name (set via `hermes meshcore set-name "MyBot"`). `MESHCORE_BOT_NAME` is
 available as an override if needed.
 
 Then enable in `~/.hermes/config.yaml`:

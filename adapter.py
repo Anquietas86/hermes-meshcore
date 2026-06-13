@@ -15,7 +15,7 @@ Configuration via environment variables::
 
     MESHCORE_HOST=192.168.0.141
     MESHCORE_PORT=5000
-    MESHCORE_BOT_NAME=Jarvis
+    MESHCORE_BOT_NAME=meshcore-bot
     MESHCORE_ADMIN_NODES=bba647077b2c
     MESHCORE_MONITOR_CHANNELS=1
     MESHCORE_ENABLE_DMS=true
@@ -473,7 +473,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         self.host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
         self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
-        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "Jarvis")  # fallback
+        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "meshcore-bot")  # fallback
 
         admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
         self.admin_nodes: Set[str] = {n.strip() for n in admin_raw.split(",") if n.strip()}
@@ -921,7 +921,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         if self.require_mention:
             # MeshCore app sends mentions as @[Full Node Name] (bracketed)
-            # Also match plain @Jarvis and Jarvis: prefixes
+            # Also match plain @name and name: prefixes
             node_name = self._self_info.get("name", "") if self._self_info else ""
             patterns = [
                 f"@[{node_name}]", f"@[{node_name.lower()}]",
@@ -1199,7 +1199,7 @@ def interactive_setup():
             save_env_value("MESHCORE_PORT", str(int(port)))
         except ValueError:
             pass
-    bot_name = prompt("Bot name", default=get_env_value("MESHCORE_BOT_NAME") or "Jarvis")
+    bot_name = prompt("Bot name", default=get_env_value("MESHCORE_BOT_NAME") or "meshcore-bot")
     if bot_name:
         save_env_value("MESHCORE_BOT_NAME", bot_name.strip())
     admin = prompt("Admin pubkey prefixes", default=get_env_value("MESHCORE_ADMIN_NODES") or "")
