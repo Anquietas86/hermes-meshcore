@@ -717,7 +717,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         """Watch for message silence and auto-reconnect if the connection stalls.
 
         If no messages arrive for 120 seconds, the auto-fetch loop has likely
-        died (node TCP idle timeout). Disconnect and reconnect to revive it.
+        died (node TCP idle timeout). Force-reconnect to revive it.
         """
         while self._mc is not None:
             await asyncio.sleep(30)  # Check every 30s
@@ -729,14 +729,27 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     "MeshCore: silence watchdog triggered — no messages for %.0fs, reconnecting",
                     elapsed,
                 )
+                # Don't call disconnect() — the TCP connection is dead and
+                # disconnect() will hang trying to send a command over it.
+                # Just null out the client and reconnect fresh.
+                self._stop_watchdogs()
+                self._mark_disconnected()
+                old_mc = self._mc
+                self._mc = None
+                self._subscriptions.clear()
+                # Try to close the old connection without blocking
                 try:
-                    await self.disconnect()
+                    await asyncio.wait_for(old_mc.disconnect(), timeout=3.0)
                 except Exception:
                     pass
                 try:
-                    await self.connect()
+                    ok = await self.connect()
+                    if ok:
+                        logger.info("MeshCore: watchdog reconnect successful")
+                    else:
+                        logger.error("MeshCore: watchdog reconnect failed")
                 except Exception as e:
-                    logger.error("MeshCore: watchdog reconnect failed: %s", e)
+                    logger.error("MeshCore: watchdog reconnect error: %s", e)
                 return  # connect() restarts the watchdog if successful
 
     def _start_watchdogs(self) -> None:
