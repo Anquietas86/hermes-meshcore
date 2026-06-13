@@ -409,34 +409,72 @@ class MeshCoreAdapter(BasePlatformAdapter):
         chat_id format:
           - "channel:<idx>" for channel messages
           - "dm:<pubkey_prefix>" for direct messages
+
+        Messages longer than 150 chars are split into multiple packets
+        at word boundaries and sent sequentially with a short delay.
         """
         if not self._mc:
             return SendResult(success=False, error="Not connected")
 
-        # MeshCore LoRa packets are small — keep responses very concise.
-        # The library's send_msg_with_retry handles ACK waiting and retries.
-        text = content[:150]
+        # Split into 150-char chunks at word boundaries
+        chunks = self._split_for_mesh(content, max_len=150)
+        message_ids = []
+        errors = []
 
-        try:
-            if chat_id.startswith("channel:"):
-                channel_idx = int(chat_id.split(":", 1)[1])
-                result = await self._mc.commands.send_chan_msg(channel_idx, text)
-            elif chat_id.startswith("dm:"):
-                pubkey_prefix = chat_id.split(":", 1)[1]
-                contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
-                if contact is None:
-                    return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
-                result = await self._mc.commands.send_msg_with_retry(
-                    contact, text, max_attempts=3
-                )
-            else:
-                return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
+        for i, chunk in enumerate(chunks):
+            try:
+                if chat_id.startswith("channel:"):
+                    channel_idx = int(chat_id.split(":", 1)[1])
+                    result = await self._mc.commands.send_chan_msg(channel_idx, chunk)
+                elif chat_id.startswith("dm:"):
+                    pubkey_prefix = chat_id.split(":", 1)[1]
+                    contact = self._mc.get_contact_by_key_prefix(pubkey_prefix)
+                    if contact is None:
+                        return SendResult(success=False, error=f"Contact not found: {pubkey_prefix}")
+                    result = await self._mc.commands.send_msg_with_retry(
+                        contact, chunk, max_attempts=3
+                    )
+                else:
+                    return SendResult(success=False, error=f"Invalid chat_id format: {chat_id}")
 
-            if result.is_error():
-                return SendResult(success=False, error=str(result.payload))
-            return SendResult(success=True, message_id=str(int(time.time() * 1000)))
-        except Exception as e:
-            return SendResult(success=False, error=str(e))
+                if result.is_error():
+                    errors.append(f"chunk {i+1}: {result.payload}")
+                else:
+                    message_ids.append(str(int(time.time() * 1000)))
+
+                # Small delay between chunks to avoid flooding the mesh
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.5)
+
+            except Exception as e:
+                errors.append(f"chunk {i+1}: {e}")
+
+        if errors and not message_ids:
+            return SendResult(success=False, error="; ".join(errors))
+        if errors:
+            logger.warning("MeshCore: %d/%d chunks sent, errors: %s",
+                           len(message_ids), len(chunks), errors)
+        return SendResult(
+            success=True,
+            message_id=message_ids[0] if message_ids else "",
+            metadata={"chunks_sent": len(message_ids), "chunks_total": len(chunks)},
+        )
+
+    @staticmethod
+    def _split_for_mesh(text: str, max_len: int = 150) -> list[str]:
+        """Split text into chunks ≤ max_len, breaking at word boundaries."""
+        chunks = []
+        while len(text) > max_len:
+            # Find last space within limit
+            split_at = text.rfind(" ", 0, max_len)
+            if split_at == -1:
+                # No space found — hard break
+                split_at = max_len
+            chunks.append(text[:split_at].strip())
+            text = text[split_at:].strip()
+        if text:
+            chunks.append(text)
+        return chunks or [""]
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """MeshCore has no typing indicator — no-op."""
@@ -636,9 +674,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         platform_context = (
             "PLATFORM CONTEXT — MeshCore (LoRa mesh radio): "
             "You are speaking over a low-bandwidth LoRa mesh network. "
-            "STRICT 150-CHARACTER LIMIT on every reply — the official app enforces this. "
-            "Be concise. Use abbreviations. Skip pleasantries. "
-            "One-sentence answers preferred. "
+            "Each message packet is limited to 150 characters — but you CAN "
+            "write longer responses; they will be automatically split into "
+            "multiple packets at word boundaries and sent sequentially. "
+            "Be concise but don't sacrifice completeness. "
             "No markdown formatting (no backticks, no asterisks, no links). "
             "Plain text only. "
             + security_note
