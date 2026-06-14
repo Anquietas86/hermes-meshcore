@@ -5,8 +5,8 @@ version: 1.3.4
 description: >
   MeshCore gateway adapter for Hermes Agent.
   Connects to a MeshCore companion radio node via TCP and relays
-  channel messages and DMs to the Hermes agent. Uses the meshcore_py
-  library for the MeshCore protocol.
+  channel messages and DMs to the Hermes agent. Uses the raw binary
+  protocol directly — zero external dependencies.
 author: Nous Research
 requires_env:
   - name: MESHCORE_HOST

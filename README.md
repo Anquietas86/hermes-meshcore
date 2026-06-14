@@ -4,8 +4,8 @@ Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to a
 [MeshCore](https://meshcore.net/) companion radio node via TCP, enabling
 LoRa mesh communication as a native messaging platform.
 
-Uses the **raw binary protocol** directly — zero external dependencies beyond
-Python's standard library. No `meshcore_py` required.
+Uses the **raw binary protocol** directly — zero external dependencies, Python
+standard library only.
 
 ## Features
 
