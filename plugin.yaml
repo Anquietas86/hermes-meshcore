@@ -1,7 +1,7 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 1.3.3
+version: 1.3.4
 description: >
   MeshCore gateway adapter for Hermes Agent.
   Connects to a MeshCore companion radio node via TCP and relays
