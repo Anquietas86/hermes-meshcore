@@ -992,6 +992,23 @@ class MeshCoreAdapter(BasePlatformAdapter):
             await asyncio.sleep(1.0)
         return "no_event_received"
 
+    async def send_self_advert(self) -> bool:
+        """Send a self-advertisement (flood advert) to announce presence on the mesh.
+        Returns True on success."""
+        cmd = bytes([CMD_SEND_SELF_ADVERT])
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                cmd, [PKT_OK, PKT_ERROR], timeout=10.0)
+            if pkt_type == PKT_OK:
+                logger.info("MeshCore: self advert sent successfully")
+                return True
+            else:
+                logger.warning("MeshCore: self advert failed: type=0x%02x", pkt_type)
+                return False
+        except Exception as e:
+            logger.warning("MeshCore: self advert exception: %s", e)
+            return False
+
     @staticmethod
     def _split_for_mesh(text: str, max_len: int = 150) -> list:
         chunks = []

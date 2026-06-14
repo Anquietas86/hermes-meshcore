@@ -58,8 +58,7 @@ MESHCORE_DEBUG=false                  # Enable packet-level debug logging (defau
 | *(empty)* | No channels require @mention — respond to everything |
 
 The bot name for @mention detection is auto-derived from your node's advert
-name (set via `hermes meshcore set-name "MyBot"`). `MESHCORE_BOT_NAME` is
-available as an override if needed.
+name. `MESHCORE_BOT_NAME` is available as an override if needed.
 
 Then enable in `~/.hermes/config.yaml`:
 
