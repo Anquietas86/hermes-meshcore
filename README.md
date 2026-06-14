@@ -40,6 +40,7 @@ MESHCORE_ADMIN_NODES=bba647077b2c     # Your node's pubkey prefix
 MESHCORE_HOME_CHANNEL=dm:bba647077b2c # Where cron/notifications go
 MESHCORE_MONITOR_CHANNELS=1           # Channels to respond in (empty = discover only)
 MESHCORE_ENABLE_DMS=true
+MESHCORE_ALLOWED_USERS=bba647077b2c,channel:1  # Who can talk (DMs by pubkey, channels by index)
 
 # Optional
 MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
@@ -73,6 +74,19 @@ Restart the gateway:
 ```bash
 hermes gateway restart
 ```
+
+## Authorization Model
+
+DMs and channels use different identity models:
+
+| | DM | Channel |
+|---|---|---|
+| **Identity** | `pubkey_prefix` (cryptographic) | `channel:<idx>` (stable synthetic) |
+| **Admin check** | `MESHCORE_ADMIN_NODES` | `MESHCORE_ADMIN_CHANNELS` |
+| **Allowlist** | `MESHCORE_ALLOWED_USERS=bba647077b2c` | `MESHCORE_ALLOWED_USERS=channel:3` |
+
+Display names are not used for auth — they're mutable and ambiguous.
+Use `channel:<idx>` in `MESHCORE_ALLOWED_USERS` to trust an entire channel.
 
 ## Requirements
 
