@@ -159,12 +159,24 @@ class MeshCoreRawConnection:
         Frame format: 0x3E + 2-byte LE size + payload
         """
         while True:
-            # Find frame marker
+            # Find frame marker, collecting junk bytes for batch logging
+            junk_buf = bytearray()
             while True:
                 b = await self._read_exactly(1)
                 if b[0] == FRAME_RECV_MARKER:
                     break
-                logger.debug("MeshCore(raw): skipping junk byte 0x%02x", b[0])
+                junk_buf.append(b[0])
+            
+            if junk_buf:
+                # Log readable chunks (hex + ascii) for debug analysis
+                if len(junk_buf) > 3 or any(c < 0x20 or c > 0x7E for c in junk_buf):
+                    # Binary-looking junk — hex dump
+                    logger.info("MeshCore(raw): %d junk bytes: %s", len(junk_buf), bytes(junk_buf).hex())
+                else:
+                    # Looks like ASCII debug output
+                    text = bytes(junk_buf).decode("ascii", "replace").rstrip()
+                    if text.strip():
+                        logger.info("MeshCore(raw): firmware debug: %s", text.strip())
 
             # Read size (2 bytes LE)
             size_bytes = await self._read_exactly(2)
