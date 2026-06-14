@@ -363,24 +363,29 @@ class MeshCoreRawConnection:
 
     @staticmethod
     def parse_contact_msg(payload: bytes, is_v3: bool = False) -> dict:
-        """Parse CONTACT_MSG_RECV (0x07) or V3 (0x10)."""
+        """Parse CONTACT_MSG_RECV (0x07) or V3 (0x10).
+
+        Firmware format (from companion protocol docs):
+          Standard: pubkey_prefix(6) + path_len(1) + txt_type(1) + timestamp(4) + [signature(4) if txt_type==2] + text
+          V3:       SNR(1) + reserved(2) + pubkey_prefix(6) + path_len(1) + txt_type(1) + timestamp(4) + [signature(4) if txt_type==2] + text
+
+        The path_len byte is just the hop count (or 0xFF for direct) — NO path hash
+        bytes follow it.  Same bug as parse_channel_msg: the old code read phantom
+        path bytes that consumed txt_type, timestamp, and the start of the message.
+        """
         buf = io.BytesIO(payload)
         msg = {"type": "PRIV"}
         if is_v3:
             msg["SNR"] = int.from_bytes(buf.read(1), "little", signed=True) / 4
             buf.read(2)  # reserved
         msg["pubkey_prefix"] = buf.read(6).hex()
-        plen = buf.read(1)[0]
-        if plen == 255:
-            msg["path_hash_mode"] = -1
+        path_len = buf.read(1)[0]
+        if path_len == 255:
             msg["path_len"] = 255
             msg["path"] = ""
         else:
-            msg["path_hash_mode"] = plen >> 6
-            msg["path_len"] = plen & 0x3F
-            path_hash_size = 1 << msg["path_hash_mode"]
-            path_bytes = buf.read(msg["path_len"] * path_hash_size)
-            msg["path"] = path_bytes.hex()
+            msg["path_len"] = path_len
+            msg["path"] = ""  # firmware does not include path hash bytes in this response
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little")
         if msg["txt_type"] == 2:
@@ -390,24 +395,30 @@ class MeshCoreRawConnection:
 
     @staticmethod
     def parse_channel_msg(payload: bytes, is_v3: bool = False) -> dict:
-        """Parse CHANNEL_MSG_RECV (0x08) or V3 (0x11)."""
+        """Parse CHANNEL_MSG_RECV (0x08) or V3 (0x11).
+
+        Firmware format (from companion protocol docs):
+          Standard: channel_idx(1) + path_len(1) + txt_type(1) + timestamp(4) + text
+          V3:       SNR(1) + reserved(2) + channel_idx(1) + path_len(1) + txt_type(1) + timestamp(4) + text
+
+        The path_len byte is just the hop count (or 0xFF for direct) — NO path hash
+        bytes follow it.  The old code incorrectly read path_len × hash_size bytes
+        as path data, consuming txt_type, timestamp, and the start of the message
+        text (butchering sender names like ADL-HANDHELD → HELD/NDHELD).
+        """
         buf = io.BytesIO(payload)
         msg = {"type": "CHAN"}
         if is_v3:
             msg["SNR"] = int.from_bytes(buf.read(1), "little", signed=True) / 4
             buf.read(2)  # reserved
         msg["channel_idx"] = buf.read(1)[0]
-        plen = buf.read(1)[0]
-        if plen == 255:
-            msg["path_hash_mode"] = -1
+        path_len = buf.read(1)[0]
+        if path_len == 255:
             msg["path_len"] = 255
             msg["path"] = ""
         else:
-            msg["path_hash_mode"] = plen >> 6
-            msg["path_len"] = plen & 0x3F
-            path_hash_size = 1 << msg["path_hash_mode"]  # 0→1, 1→2, 2→4, 3→8 bytes per hop
-            path_bytes = buf.read(msg["path_len"] * path_hash_size)
-            msg["path"] = path_bytes.hex()
+            msg["path_len"] = path_len
+            msg["path"] = ""  # firmware does not include path hash bytes in this response
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little", signed=False)
         msg["text"] = buf.read().decode("utf-8", "ignore")
