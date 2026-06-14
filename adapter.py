@@ -1146,6 +1146,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             "auto-split for longer responses. Plain text only, no markdown. "
             "BE CONCISE: give the answer directly, skip explanations of how you got there. "
             "Prefer 1-2 packets. "
+            "Messages are prefixed with [sender name] — address the sender by that name. "
             + security_note
         )
 
