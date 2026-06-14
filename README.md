@@ -44,6 +44,7 @@ MESHCORE_ENABLE_DMS=true
 # Optional
 MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
 MESHCORE_REQUIRE_MENTION=0,2,3        # Channels requiring @mention (empty = none, "true" = all)
+MESHCORE_DEBUG=false                  # Enable packet-level debug logging (default: false)
 ```
 
 ### Per-channel @mention gating
@@ -65,7 +66,7 @@ Then enable in `~/.hermes/config.yaml`:
 ```yaml
 plugins:
   enabled:
-    - platforms/meshcore
+    - meshcore-platform
 ```
 
 Restart the gateway:

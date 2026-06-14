@@ -1,7 +1,7 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 1.3.4
+version: 1.3.6
 description: >
   MeshCore gateway adapter for Hermes Agent.
   Connects to a MeshCore companion radio node via TCP and relays
@@ -53,4 +53,8 @@ optional_env:
   - name: MESHCORE_REQUIRE_MENTION
     description: "In channels, require @bot-name mention to respond (true/false, default: true)"
     prompt: "Require @mention in channels?"
+    password: false
+  - name: MESHCORE_DEBUG
+    description: "Enable packet-level debug logging for troubleshooting (true/false, default: false)"
+    prompt: "Enable packet debugging?"
     password: false

@@ -488,6 +488,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
         self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "meshcore-bot")  # fallback
 
+        # Packet-level debug logging — set MESHCORE_DEBUG=true to see every frame
+        debug_raw = os.getenv("MESHCORE_DEBUG") or extra.get("debug", "")
+        self.debug_enabled = debug_raw.lower() in {"1", "true", "yes"}
+        if self.debug_enabled:
+            logger.setLevel(logging.INFO)
+            logger.info("MeshCore: packet debugging ENABLED — all send/recv frames will be logged")
+
         admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
         self.admin_nodes: Set[str] = {n.strip() for n in admin_raw.split(",") if n.strip()}
 
