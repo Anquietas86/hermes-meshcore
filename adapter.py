@@ -1078,13 +1078,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not user_prompt:
             return
 
-        # Channel messages are authorized at the channel level, not by the
-        # sender's display name. Display names are unstable and can differ from
-        # the DM/pubkey identity, which breaks gateway allowlist checks.
-        # Use a stable synthetic user_id per channel so operators can trust an
-        # entire channel (e.g. `channel:3`) while still preserving sender_name
-        # for display/context inside the conversation.
-        user_id = f"channel:{channel_idx}" if channel_idx is not None else "channel:unknown"
+        # Channel messages use a per-sender user_id so the gateway can
+        # distinguish users for [name] prefixing and per-user sessions.
+        # Display names are self-reported and can change, but that's
+        # acceptable — losing session context on a name change is better
+        # than the agent thinking everyone is the same person.
+        user_id = f"channel:{channel_idx}:{sender_name}" if channel_idx is not None else f"channel:unknown:{sender_name}"
         await self._dispatch_message(
             text=user_prompt, chat_id=f"channel:{channel_idx}", chat_type="group",
             user_id=user_id, user_name=sender_name, is_admin=False,
