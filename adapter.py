@@ -1335,7 +1335,12 @@ def _env_enablement():
                 seed[name] = val
     home = os.getenv("MESHCORE_HOME_CHANNEL", "").strip()
     if home:
-        seed["home_channel"] = {"chat_id": f"channel:{home}", "name": f"MeshCore Channel {home}"}
+        # Support both dm:pubkey and numeric channel index
+        if home.startswith("dm:"):
+            pubkey = home.split(":", 1)[1]
+            seed["home_channel"] = {"chat_id": f"dm:{pubkey}", "name": f"MeshCore DM ({pubkey[:8]}...)"}
+        else:
+            seed["home_channel"] = {"chat_id": f"channel:{home}", "name": f"MeshCore Channel {home}"}
     return seed
 
 def interactive_setup():
