@@ -922,9 +922,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 else:
                     return SendResult(success=False, error=f"Invalid chat_id: {chat_id}")
 
-                # On first failure, reconnect and retry once
-                if result is not True and i == 0:
-                    logger.warning("MeshCore: send failed, reconnecting and retrying")
+                # On first failure, reconnect and retry once — but ONLY for
+                # connection-level errors (not timeout strings). Retrying a
+                # timeout sends a duplicate packet that the receiving node
+                # sees as a corrupted/overlapping transmission.
+                if result is not True and i == 0 and not isinstance(result, str):
+                    logger.warning("MeshCore: send failed (connection error), reconnecting and retrying")
                     await self._reconnect()
                     if chat_id.startswith("channel:"):
                         channel_idx = int(chat_id.split(":", 1)[1])
