@@ -556,6 +556,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._watchdog_task: Optional[asyncio.Task] = None
         self._stats_refresh_task: Optional[asyncio.Task] = None
         self._stats_cache: Dict[str, Any] = {}
+        # Deduplication: prevent double-delivery when a message arrives as
+        # unsolicited during a poll command's wait and then again as the
+        # poll response. Keys: "dm:{pubkey}:{ts}" / "ch:{idx}:{sender}:{ts}"
+        self._seen_messages: Set[str] = set()
 
     @property
     def name(self) -> str:
@@ -949,26 +953,32 @@ class MeshCoreAdapter(BasePlatformAdapter):
         )
 
     async def _send_channel_msg(self, channel_idx: int, text: str):
-        """Send a channel message. Returns True on success, error string on failure."""
+        """Send a channel message. Single-shot fire-and-forget — retrying
+        on timeout sends a duplicate packet that the receiving node sees as
+        a corrupted/overlapping transmission, producing garbled text.
+        Returns True on success, error string on failure (message may have
+        been delivered despite the error)."""
         timestamp = int(time.time())
-        for attempt in range(3):
-            cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
-                  timestamp.to_bytes(4, "little") + text.encode("utf-8")
-            logger.debug("MeshCore: _send_channel_msg attempt=%d cmd=%s", attempt, cmd.hex()[:30])
-            try:
-                pkt_type, payload = await self._conn.send_command(
-                    cmd, [PKT_OK, PKT_ERROR], timeout=15.0)
-                logger.debug("MeshCore: _send_channel_msg result type=0x%02x payload=%s",
-                             pkt_type, payload[:20].hex() if payload else "empty")
-                if pkt_type == PKT_OK:
-                    return True
-            except Exception as e:
-                logger.debug("MeshCore: _send_channel_msg exception: %s", e)
-            await asyncio.sleep(1.0)
-        return "no_event_received"
+        cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
+              timestamp.to_bytes(4, "little") + text.encode("utf-8")
+        logger.debug("MeshCore: _send_channel_msg cmd=%s", cmd.hex()[:30])
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                cmd, [PKT_OK, PKT_ERROR], timeout=15.0)
+            logger.debug("MeshCore: _send_channel_msg result type=0x%02x payload=%s",
+                         pkt_type, payload[:20].hex() if payload else "empty")
+            if pkt_type == PKT_OK:
+                return True
+        except Exception as e:
+            logger.debug("MeshCore: _send_channel_msg exception: %s", e)
+        return "send_timeout (message may have been delivered)"
 
     async def _send_dm(self, pubkey_prefix: str, text: str):
-        """Send a DM. Returns True on MSG_SENT (node accepted), error string on failure.
+        """Send a DM. Single-shot fire-and-forget — retrying on timeout
+        sends a duplicate packet that the receiving node sees as a
+        corrupted/overlapping transmission, producing garbled text.
+        Returns True on MSG_SENT (node accepted), error string on failure
+        (message may have been delivered despite the error).
 
         Does NOT wait for over-the-air ACK — that can take 30+ seconds on LoRa
         and would block the command lock, preventing message reception.
@@ -987,21 +997,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
         dst_bytes = bytes.fromhex(contact["public_key"])[:6]
         timestamp = int(time.time())
 
-        for attempt in range(3):
-            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, attempt]) + \
-                  timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
-            logger.debug("MeshCore: _send_dm attempt=%d cmd=%s", attempt, cmd.hex()[:30])
-            try:
-                pkt_type, payload = await self._conn.send_command(
-                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                logger.debug("MeshCore: _send_dm result type=0x%02x payload=%s",
-                             pkt_type, payload[:20].hex() if payload else "empty")
-                if pkt_type == PKT_MSG_SENT:
-                    return True
-            except Exception as e:
-                logger.debug("MeshCore: _send_dm exception: %s", e)
-            await asyncio.sleep(1.0)
-        return "no_event_received"
+        cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+              timestamp.to_bytes(4, "little") + dst_bytes + text.encode("utf-8")
+        logger.debug("MeshCore: _send_dm cmd=%s", cmd.hex()[:30])
+        try:
+            pkt_type, payload = await self._conn.send_command(
+                cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+            logger.debug("MeshCore: _send_dm result type=0x%02x payload=%s",
+                         pkt_type, payload[:20].hex() if payload else "empty")
+            if pkt_type == PKT_MSG_SENT:
+                return True
+        except Exception as e:
+            logger.debug("MeshCore: _send_dm exception: %s", e)
+        return "send_timeout (message may have been delivered)"
 
     async def send_self_advert(self) -> bool:
         """Send a self-advertisement (flood advert) to announce presence on the mesh.
@@ -1051,6 +1059,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._last_message_time = time.time()
         channel_idx = msg.get("channel_idx")
         text = msg.get("text", "")
+
+        # Deduplication: skip if already seen (unsolicited + poll double-delivery)
+        ts = msg.get("sender_timestamp", 0)
+        sender_name_raw = text.split(":", 1)[0].strip() if ":" in text else "?"
+        dedup_key = f"ch:{channel_idx}:{sender_name_raw}:{ts}"
+        if dedup_key in self._seen_messages:
+            return
+        self._seen_messages.add(dedup_key)
+        # Prune to last 100 entries when set exceeds 200
+        if len(self._seen_messages) > 200:
+            self._seen_messages = set(list(self._seen_messages)[-100:])
 
         logger.info("MeshCore: CHANNEL ch=%s from=%s text=%s",
                     channel_idx, text.split(":",1)[0].strip() if ":" in text else "?", text[:50])
@@ -1111,6 +1130,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return
         text = msg.get("text", "")
         pubkey_prefix = msg.get("pubkey_prefix", "")
+
+        # Deduplication: skip if already seen (unsolicited + poll double-delivery)
+        ts = msg.get("sender_timestamp", 0)
+        dedup_key = f"dm:{pubkey_prefix}:{ts}"
+        if dedup_key in self._seen_messages:
+            return
+        self._seen_messages.add(dedup_key)
+        # Prune to last 100 entries when set exceeds 200
+        if len(self._seen_messages) > 200:
+            self._seen_messages = set(list(self._seen_messages)[-100:])
 
         sender_name = "unknown"
         user_prompt = text
