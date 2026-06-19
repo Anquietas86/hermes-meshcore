@@ -442,7 +442,118 @@
       ),
 
       // ── Configuration card ──────────────────────────────────────────
-      React.createElement(ConfigCard, { channels: data.channels, channelNames: data.channel_names })
+      React.createElement(ConfigCard, { channels: data.channels, channelNames: data.channel_names }),
+
+      // ── Admin Query card ────────────────────────────────────────────
+      React.createElement(AdminQueryCard, {})
+    );
+  }
+
+  // ── AdminQueryCard sub-component ──────────────────────────────────────
+  function AdminQueryCard() {
+    var _React = React;
+    var useState = _React.useState;
+    var useEffect = _React.useEffect;
+
+    var _a = useState(""), queryNode = _a[0], setQueryNode = _a[1];
+    var _b = useState("stats-core"), queryCmd = _b[0], setQueryCmd = _b[1];
+    var _c = useState(""), queryPw = _c[0], setQueryPw = _c[1];
+    var _d = useState(false), querying = _d[0], setQuerying = _d[1];
+    var _e = useState(null), queryResult = _e[0], setQueryResult = _e[1];
+    var _f = useState(null), queryPollTimer = _f[0], setQueryPollTimer = _f[1];
+
+    // Cleanup poll timer on unmount
+    useEffect(function () {
+      return function () { if (queryPollTimer) clearInterval(queryPollTimer); };
+    }, []);
+
+    function handleAdminQuery() {
+      if (!queryNode.trim()) { setQueryResult({ error: "Enter a node name or pubkey prefix" }); return; }
+      setQuerying(true);
+      setQueryResult(null);
+      api("/admin/query", { method: "POST", body: JSON.stringify({ node: queryNode.trim(), command: queryCmd.trim(), password: queryPw }) })
+        .then(function (d) {
+          if (!d.success) { setQuerying(false); setQueryResult({ error: d.detail || "Submit failed" }); return; }
+          var pollCount = 0;
+          var timer = setInterval(function () {
+            pollCount++;
+            api("/admin/result?request_id=" + encodeURIComponent(d.request_id))
+              .then(function (r) {
+                if (r.status === "complete") {
+                  clearInterval(timer);
+                  setQueryPollTimer(null);
+                  setQuerying(false);
+                  setQueryResult(r.result);
+                } else if (pollCount > 20) {
+                  clearInterval(timer);
+                  setQueryPollTimer(null);
+                  setQuerying(false);
+                  setQueryResult({ error: "Timed out waiting for response" });
+                }
+              })
+              .catch(function (e) {
+                clearInterval(timer);
+                setQueryPollTimer(null);
+                setQuerying(false);
+                setQueryResult({ error: "Poll failed: " + String(e) });
+              });
+          }, 3000);
+          setQueryPollTimer(timer);
+        })
+        .catch(function (e) {
+          setQuerying(false);
+          setQueryResult({ error: "Submit failed: " + String(e) });
+        });
+    }
+
+    return React.createElement(C.Card, null,
+      React.createElement(C.CardContent, null,
+        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🔧 Remote Repeater Admin"),
+        React.createElement("div", { className: "mc-admin-row" },
+          React.createElement("input", {
+            className: "mc-config-input",
+            type: "text",
+            value: queryNode,
+            onChange: function (e) { setQueryNode(e.target.value); },
+            placeholder: "Node name or pubkey prefix",
+            style: { flex: 2 },
+          }),
+          React.createElement("input", {
+            className: "mc-config-input",
+            type: "text",
+            value: queryCmd,
+            onChange: function (e) { setQueryCmd(e.target.value); },
+            placeholder: "Command (e.g. stats-core)",
+            style: { flex: 1 },
+          }),
+          React.createElement("input", {
+            className: "mc-config-input",
+            type: "text",
+            value: queryPw,
+            onChange: function (e) { setQueryPw(e.target.value); },
+            placeholder: "Password (if needed)",
+            style: { flex: 1 },
+          }),
+          React.createElement("button", {
+            className: "mc-btn mc-btn-save",
+            onClick: handleAdminQuery,
+            disabled: querying,
+            style: { whiteSpace: "nowrap" },
+          }, querying ? "⏳ Querying…" : "🚀 Send")
+        ),
+        queryResult && React.createElement("div", { className: "mc-admin-result" },
+          queryResult.error
+            ? React.createElement("div", { style: { color: "var(--color-danger, #ef4444)" } }, "❌ ", queryResult.error)
+            : queryResult.success === false
+              ? React.createElement("div", { style: { color: "var(--color-danger, #ef4444)" } }, "❌ ", queryResult.error || "Query failed")
+              : React.createElement("div", null,
+                  React.createElement("div", { style: { color: "var(--color-success, #22c55e)", marginBottom: "0.35rem" } }, "✅ Response from ", queryResult.node && queryResult.node.name || "node"),
+                  queryResult.responses && queryResult.responses.length > 0
+                    ? React.createElement("pre", { className: "mc-admin-output" }, queryResult.responses.join("\n"))
+                    : React.createElement("div", { style: { color: "var(--color-muted)" } }, "No response received — node may not have admin CLI enabled")
+                )
+        )
+      )
     );
   }
 
@@ -461,23 +572,11 @@
     var _d = useState(false), restarting = _d[0], setRestarting = _d[1];
     var _e = useState(null), saveMsg = _e[0], setSaveMsg = _e[1];
     var _h = useState(false), loading = _h[0], setLoading = _h[1];
-    // Admin query state
-    var _i = useState(""), queryNode = _i[0], setQueryNode = _i[1];
-    var _j = useState("stats-core"), queryCmd = _j[0], setQueryCmd = _j[1];
-    var _k = useState(""), queryPw = _k[0], setQueryPw = _k[1];
-    var _l = useState(false), querying = _l[0], setQuerying = _l[1];
-    var _m = useState(null), queryResult = _m[0], setQueryResult = _m[1];
-    var _n = useState(null), queryPollTimer = _n[0], setQueryPollTimer = _n[1];
 
     // Channel checkbox state: { chIndex: { monitor: bool, admin: bool, mention: bool } }
     var _f = useState({}), chChecks = _f[0], setChChecks = _f[1];
     // Boolean toggle state
     var _g = useState({ allow_all_users: false, enable_dms: false }), boolToggles = _g[0], setBoolToggles = _g[1];
-
-    // Cleanup poll timer on unmount (must be before any early returns)
-    React.useEffect(function () {
-      return function () { if (queryPollTimer) clearInterval(queryPollTimer); };
-    }, []);
 
     useEffect(function () {
       api("/config")
@@ -646,46 +745,6 @@
         });
     }
 
-    function handleAdminQuery() {
-      if (!queryNode.trim()) { setQueryResult({ error: "Enter a node name or pubkey prefix" }); return; }
-      setQuerying(true);
-      setQueryResult(null);
-      api("/admin/query", { method: "POST", body: JSON.stringify({ node: queryNode.trim(), command: queryCmd.trim(), password: queryPw }) })
-        .then(function (d) {
-          if (!d.success) { setQuerying(false); setQueryResult({ error: d.detail || "Submit failed" }); return; }
-          // Start polling for result
-          var pollCount = 0;
-          var timer = setInterval(function () {
-            pollCount++;
-            api("/admin/result?request_id=" + encodeURIComponent(d.request_id))
-              .then(function (r) {
-                if (r.status === "complete") {
-                  clearInterval(timer);
-                  setQueryPollTimer(null);
-                  setQuerying(false);
-                  setQueryResult(r.result);
-                } else if (pollCount > 20) {
-                  clearInterval(timer);
-                  setQueryPollTimer(null);
-                  setQuerying(false);
-                  setQueryResult({ error: "Timed out waiting for response" });
-                }
-              })
-              .catch(function (e) {
-                clearInterval(timer);
-                setQueryPollTimer(null);
-                setQuerying(false);
-                setQueryResult({ error: "Poll failed: " + String(e) });
-              });
-          }, 3000);
-          setQueryPollTimer(timer);
-        })
-        .catch(function (e) {
-          setQuerying(false);
-          setQueryResult({ error: "Submit failed: " + String(e) });
-        });
-    }
-
     var textFields = [
       { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
       { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
@@ -776,57 +835,6 @@
               })
             );
           })
-        ),
-
-        // ── Admin Query ────────────────────────────────────────────────
-        React.createElement("div", { style: { marginBottom: "0.75rem" } },
-          React.createElement("div", { className: "mc-config-label", style: { marginBottom: "0.35rem" } }, "🔧 Remote Repeater Admin"),
-          React.createElement("div", { className: "mc-admin-query" },
-            React.createElement("div", { className: "mc-admin-row" },
-              React.createElement("input", {
-                className: "mc-config-input",
-                type: "text",
-                value: queryNode,
-                onChange: function (e) { setQueryNode(e.target.value); },
-                placeholder: "Node name or pubkey prefix",
-                style: { flex: 2 },
-              }),
-              React.createElement("input", {
-                className: "mc-config-input",
-                type: "text",
-                value: queryCmd,
-                onChange: function (e) { setQueryCmd(e.target.value); },
-                placeholder: "Command (e.g. stats-core)",
-                style: { flex: 1 },
-              }),
-              React.createElement("input", {
-                className: "mc-config-input",
-                type: "text",
-                value: queryPw,
-                onChange: function (e) { setQueryPw(e.target.value); },
-                placeholder: "Password (if needed)",
-                style: { flex: 1 },
-              }),
-              React.createElement("button", {
-                className: "mc-btn mc-btn-save",
-                onClick: handleAdminQuery,
-                disabled: querying,
-                style: { whiteSpace: "nowrap" },
-              }, querying ? "⏳ Querying…" : "🚀 Send")
-            ),
-            queryResult && React.createElement("div", { className: "mc-admin-result" },
-              queryResult.error
-                ? React.createElement("div", { style: { color: "var(--color-danger, #ef4444)" } }, "❌ ", queryResult.error)
-                : queryResult.success === false
-                  ? React.createElement("div", { style: { color: "var(--color-danger, #ef4444)" } }, "❌ ", queryResult.error || "Query failed")
-                  : React.createElement("div", null,
-                      React.createElement("div", { style: { color: "var(--color-success, #22c55e)", marginBottom: "0.35rem" } }, "✅ Response from ", queryResult.node && queryResult.node.name || "node"),
-                      queryResult.responses && queryResult.responses.length > 0
-                        ? React.createElement("pre", { className: "mc-admin-output" }, queryResult.responses.join("\n"))
-                        : React.createElement("div", { style: { color: "var(--color-muted)" } }, "No response received — node may not have admin CLI enabled")
-                    )
-            )
-          )
         ),
 
         React.createElement("div", { className: "mc-config-actions" },
