@@ -319,6 +319,23 @@
           height: auto;
           accent-color: unset;
         }
+        .mc-bool-row {
+          display: flex;
+          gap: 1.5rem;
+          align-items: center;
+        }
+        .mc-bool-label {
+          display: flex;
+          align-items: center;
+          gap: 0.35rem;
+          font-size: 0.8rem;
+          cursor: pointer;
+        }
+        .mc-bool-label input[type="checkbox"] {
+          width: 14px;
+          height: 14px;
+          accent-color: var(--color-accent, #6366f1);
+        }
       `),
 
       // ── Connection & Contacts card (merged) ──────────────────────────
@@ -477,6 +494,8 @@
 
     // Channel checkbox state: { chIndex: { monitor: bool, admin: bool, mention: bool } }
     var _f = useState({}), chChecks = _f[0], setChChecks = _f[1];
+    // Boolean toggle state
+    var _g = useState({ allow_all_users: false, enable_dms: false }), boolToggles = _g[0], setBoolToggles = _g[1];
 
     useEffect(function () {
       api("/config")
@@ -496,6 +515,11 @@
             };
           });
           setChChecks(checks);
+          // Parse boolean toggles
+          setBoolToggles({
+            allow_all_users: String(d.allow_all_users || "").toLowerCase() === "true",
+            enable_dms: String(d.enable_dms || "").toLowerCase() === "true",
+          });
         })
         .catch(function () {});
     }, []);
@@ -524,6 +548,12 @@
       setChChecks(next);
     }
 
+    function toggleBool(key) {
+      var next = Object.assign({}, boolToggles);
+      next[key] = !next[key];
+      setBoolToggles(next);
+    }
+
     function handleSave() {
       // Build channel config from checkbox state
       var monitorChs = [];
@@ -540,7 +570,13 @@
         require_mention_channels: mentionChs.join(", "),
       };
 
-      // Merge text field edits with channel checkbox edits
+      // Boolean toggle edits
+      var boolEdits = {
+        allow_all_users: boolToggles.allow_all_users ? "true" : "false",
+        enable_dms: boolToggles.enable_dms ? "true" : "false",
+      };
+
+      // Merge text field edits with channel checkbox edits + bool toggles
       var changed = {};
       var hasChanges = false;
       for (var k in edits) {
@@ -552,6 +588,12 @@
       for (var ck in channelEdits) {
         if (channelEdits[ck] !== (config[ck] || "")) {
           changed[ck] = channelEdits[ck];
+          hasChanges = true;
+        }
+      }
+      for (var bk in boolEdits) {
+        if (boolEdits[bk] !== (config[bk] || "")) {
+          changed[bk] = boolEdits[bk];
           hasChanges = true;
         }
       }
@@ -588,8 +630,6 @@
     var textFields = [
       { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
       { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
-      { key: "allow_all_users", label: "Allow All Users", hint: "true/false" },
-      { key: "enable_dms", label: "Enable DMs", hint: "true/false" },
     ];
 
     return React.createElement(C.Card, null,
@@ -636,6 +676,29 @@
                 })
               );
             })
+          )
+        ),
+
+        // ── Boolean toggles ───────────────────────────────────────────
+        React.createElement("div", { style: { marginBottom: "0.75rem" } },
+          React.createElement("div", { className: "mc-config-label", style: { marginBottom: "0.35rem" } }, "Access"),
+          React.createElement("div", { className: "mc-bool-row" },
+            React.createElement("label", { className: "mc-bool-label" },
+              React.createElement("input", {
+                type: "checkbox",
+                checked: boolToggles.allow_all_users,
+                onChange: function () { toggleBool("allow_all_users"); },
+              }),
+              " Allow All Users"
+            ),
+            React.createElement("label", { className: "mc-bool-label" },
+              React.createElement("input", {
+                type: "checkbox",
+                checked: boolToggles.enable_dms,
+                onChange: function () { toggleBool("enable_dms"); },
+              }),
+              " Enable DMs"
+            )
           )
         ),
 
