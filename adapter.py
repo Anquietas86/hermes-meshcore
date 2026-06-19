@@ -1582,7 +1582,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             # Send auth DM if password provided
             if password:
                 ts = int(time.time())
-                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 1]) + \
                           ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
                 try:
                     await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
@@ -1591,7 +1591,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
             # Send the command DM
             ts = int(time.time())
-            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 1]) + \
                   ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
             try:
                 pkt_type, _ = await self._conn.send_command(
