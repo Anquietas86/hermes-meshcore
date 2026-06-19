@@ -812,6 +812,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             try:
                 await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
                 failures = 0
+                # Write state file for dashboard after successful keepalive
+                self._write_state_file()
             except Exception as e:
                 failures += 1
                 logger.warning("MeshCore: keepalive failed (%d): %s", failures, e)
@@ -819,6 +821,75 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     logger.warning("MeshCore: keepalive — reconnecting after %d failures", failures)
                     await self._reconnect()
                     return
+
+    # ── State file for dashboard ──────────────────────────────────────────
+
+    STATE_FILE = "/tmp/hermes-meshcore-state.json"
+
+    def _write_state_file(self):
+        """Write current adapter state to a shared JSON file for the dashboard API."""
+        try:
+            state = {
+                "connected": self._conn is not None and self._conn.is_connected,
+                "host": self.host,
+                "port": self.port,
+                "node": self._build_node_info(),
+                "stats": self._build_stats_info(),
+                "contacts": self._build_contacts_info(),
+                "channels": sorted(self._discovered_channels) if self._discovered_channels else [],
+                "last_message_ago_s": round(time.time() - self._last_message_time, 1) if self._last_message_time else None,
+                "dms_enabled": self.enable_dms,
+                "admin": {
+                    "nodes": sorted(self.admin_nodes) if self.admin_nodes else [],
+                    "channels": sorted(self.admin_channels) if self.admin_channels else [],
+                    "require_mention_channels": sorted(self.require_mention_channels) if self.require_mention_channels else [],
+                },
+                "updated_at": time.time(),
+            }
+            with open(self.STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception:
+            pass  # Non-critical — dashboard will show stale data
+
+    def _build_node_info(self) -> dict:
+        si = self._self_info or {}
+        radio = {}
+        if si.get("radio_freq"):
+            radio["freq_mhz"] = round(si["radio_freq"], 3)
+        if si.get("radio_bw"):
+            radio["bw_khz"] = round(si["radio_bw"], 1)
+        if si.get("radio_sf"):
+            radio["sf"] = si["radio_sf"]
+        if si.get("radio_cr"):
+            radio["cr"] = si["radio_cr"]
+        return {
+            "name": si.get("name", "unknown"),
+            "pubkey_prefix": si.get("public_key", "")[:12] if si.get("public_key") else "",
+            "lat": si.get("adv_lat"),
+            "lon": si.get("adv_lon"),
+            "radio": radio if radio else None,
+        }
+
+    def _build_stats_info(self) -> dict:
+        s = self._stats_cache or {}
+        return {
+            "battery_mv": s.get("battery"),
+            "uptime_s": s.get("uptime"),
+            "tx_packets": s.get("tx_packets"),
+            "rx_packets": s.get("rx_packets"),
+            "noise": s.get("noise"),
+            "rssi": s.get("rssi"),
+            "snr": s.get("snr"),
+        }
+
+    def _build_contacts_info(self) -> dict:
+        contacts = self._contacts or {}
+        return {
+            "total": len(contacts),
+            "repeaters": sum(1 for c in contacts.values() if c.get("type") == 2),
+            "clients": sum(1 for c in contacts.values() if c.get("type") == 1),
+            "rooms": sum(1 for c in contacts.values() if c.get("type") == 3),
+        }
 
     # ── Watchdog ──────────────────────────────────────────────────────────
 

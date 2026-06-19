@@ -154,6 +154,53 @@
         }
         .mc-contact-chip strong { font-family: var(--font-mono, monospace); }
         .mc-error-card, .mc-loading-card { padding: 1.5rem; }
+        .mc-channel-list {
+          display: flex;
+          flex-direction: column;
+          gap: 0.35rem;
+        }
+        .mc-channel-item {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 0.35rem 0;
+          border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.04));
+          font-size: 0.85rem;
+        }
+        .mc-channel-item:last-child { border-bottom: none; }
+        .mc-channel-name { font-weight: 500; }
+        .mc-channel-badge {
+          font-family: var(--font-mono, monospace);
+          font-size: 0.75rem;
+          color: var(--color-muted);
+        }
+        .mc-tag-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.35rem;
+        }
+        .mc-tag {
+          display: inline-block;
+          padding: 0.2rem 0.5rem;
+          border-radius: var(--radius-sm, 0.25rem);
+          font-size: 0.75rem;
+          font-family: var(--font-mono, monospace);
+        }
+        .mc-tag-admin {
+          background: rgba(34, 197, 94, 0.12);
+          color: var(--color-success, #22c55e);
+          border: 1px solid rgba(34, 197, 94, 0.25);
+        }
+        .mc-tag-channel {
+          background: rgba(59, 130, 246, 0.12);
+          color: var(--color-info, #3b82f6);
+          border: 1px solid rgba(59, 130, 246, 0.25);
+        }
+        .mc-tag-mention {
+          background: rgba(245, 158, 11, 0.12);
+          color: var(--color-warning, #f59e0b);
+          border: 1px solid rgba(245, 158, 11, 0.25);
+        }
       `),
 
       // ── Connection card ────────────────────────────────────────────
@@ -211,7 +258,64 @@
             React.createElement("div", { className: "mc-contact-chip" }, "🏠 ", React.createElement("strong", null, contacts.rooms || 0), " rooms")
           )
         )
-      )
+      ),
+
+      // ── Channels card ──────────────────────────────────────────────
+      data.channels && data.channels.length > 0 && React.createElement(C.Card, null,
+        React.createElement(C.CardContent, null,
+          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "📢 Channels (" + data.channels.length + ")"),
+          React.createElement("div", { className: "mc-channel-list" },
+            data.channels.map(function (ch) {
+              return React.createElement("div", { key: ch, className: "mc-channel-item" },
+                React.createElement("span", { className: "mc-channel-name" }, ch),
+                React.createElement("span", { className: "mc-channel-badge" }, "ch " + ch)
+              );
+            })
+          )
+        )
+      ),
+
+      // ── Admin card ─────────────────────────────────────────────────
+      (function () {
+        var admin = data.admin || {};
+        var hasContent = (admin.nodes && admin.nodes.length > 0) ||
+                         (admin.channels && admin.channels.length > 0) ||
+                         (admin.require_mention_channels && admin.require_mention_channels.length > 0);
+        if (!hasContent) return null;
+
+        return React.createElement(C.Card, null,
+          React.createElement(C.CardContent, null,
+            React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🔐 Admin Settings"),
+
+            admin.nodes && admin.nodes.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
+              React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "Authorised Admin Nodes"),
+              React.createElement("div", { className: "mc-tag-list" },
+                admin.nodes.map(function (n) {
+                  return React.createElement("span", { key: n, className: "mc-tag mc-tag-admin" }, n);
+                })
+              )
+            ),
+
+            admin.channels && admin.channels.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
+              React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "Admin Channels (trusted, no mention required)"),
+              React.createElement("div", { className: "mc-tag-list" },
+                admin.channels.map(function (c) {
+                  return React.createElement("span", { key: c, className: "mc-tag mc-tag-channel" }, "ch " + c);
+                })
+              )
+            ),
+
+            admin.require_mention_channels && admin.require_mention_channels.length > 0 && React.createElement("div", null,
+              React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "Mention-Gated Channels (@mention required)"),
+              React.createElement("div", { className: "mc-tag-list" },
+                admin.require_mention_channels.map(function (c) {
+                  return React.createElement("span", { key: c, className: "mc-tag mc-tag-mention" }, "ch " + c);
+                })
+              )
+            )
+          )
+        );
+      })()
     );
   }
 
