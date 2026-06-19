@@ -953,7 +953,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._stats_refresh_task = None
 
     async def _stats_refresh_loop(self):
-        """Refresh stats cache every 5 minutes."""
+        """Refresh stats cache immediately, then every 5 minutes."""
+        # Immediate first fetch
+        try:
+            self._stats_cache = await self.get_stats()
+        except Exception as e:
+            logger.debug("MeshCore: initial stats fetch error: %s", e)
         while self._conn and self._conn.is_connected:
             await asyncio.sleep(300)
             if not self._conn or not self._conn.is_connected:
