@@ -2199,14 +2199,12 @@ def register(ctx):
                 "Works from any session — writes a request file, gateway processes it within 15s, "
                 "then polls for the response (up to 60s). Use this instead of meshcore_admin when "
                 "the gateway process is separate from your session. "
-                "Supported read-only commands: ver, board, clock, stats-core, stats-radio, "
-                "stats-packets, neighbors, advert, get name, get radio, get tx, get repeat, "
-                "get public.key, get advert.interval, get owner.info, get bridge.type, gps, "
-                "region list allowed, region list denied. "
-                "Write commands (require password): set name, set tx, set repeat on/off, "
-                "setperm, reboot, clear stats, gps on/off/sync/setloc, powersaving on/off. "
-                "Also supports raw protocol commands: req_status, req_neighbours, req_telemetry, "
-                "req_acl, req_owner, req_clock, req_regions."
+                "Supported commands: ver, board, clock, stats-core, stats-radio, "
+                "stats-packets, neighbors, get owner.info, region list allowed, "
+                "region list denied, req_status, req_neighbours, req_telemetry, "
+                "req_acl, req_owner, req_clock, req_regions. "
+                "Note: text CLI commands (set, reboot, gps, etc.) only work over "
+                "serial/UART — not available remotely over the mesh."
             ),
             "parameters": {
                 "type": "object",
