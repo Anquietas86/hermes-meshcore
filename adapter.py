@@ -776,7 +776,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         elif pkt_type in (PKT_BINARY_RESPONSE, PKT_STATUS_RESPONSE, PKT_TELEMETRY_RESPONSE):
             # Binary response push — capture for admin query if active
             if self._admin_query_target:
-                logger.info("MeshCore: admin query CAPTURED binary push type=0x%02x len=%d",
+                logger.debug("MeshCore: admin query CAPTURED binary push type=0x%02x len=%d",
                              pkt_type, len(payload) if payload else 0)
                 if pkt_type == PKT_STATUS_RESPONSE:
                     parsed = self._parse_status_response(payload, self._admin_query_target)
@@ -794,7 +794,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         pubkey_prefix = msg.get("pubkey_prefix", "")
         if self._admin_query_target and pubkey_prefix.lower() == self._admin_query_target.lower():
             text = msg.get("text", "")
-            logger.info("MeshCore: admin query CAPTURED response from %s: %s",
+            logger.debug("MeshCore: admin query CAPTURED response from %s: %s",
                          pubkey_prefix, text[:80] if text else "(empty)")
             if text:
                 self._admin_query_responses.append(text)
@@ -933,13 +933,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
             request_id = req.get("request_id", "")
 
             logger.info("MeshCore: processing admin request %s: %s → %s", request_id, node, command)
-            result = await self.query_remote_repeater(node, command, password=password, timeout=60.0)
+            result = await self.query_remote_repeater(node, command, password=password, timeout=90.0)
             result["request_id"] = request_id
             result["completed_at"] = time.time()
 
             with open(self.ADMIN_RESPONSE_FILE, "w") as f:
                 json.dump(result, f)
-            logger.info("MeshCore: admin request %s complete: %s", request_id,
+            logger.debug("MeshCore: admin request %s complete: %s", request_id,
                         "success" if result.get("success") else "failed")
         except Exception as e:
             logger.warning("MeshCore: admin request processing failed: %s", e)
@@ -1734,7 +1734,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return "\n".join(lines)
 
     async def query_remote_repeater(self, name: str, command: str,
-                                     timeout: float = 60.0,
+                                     timeout: float = 90.0,
                                      password: str = "") -> Dict[str, Any]:
         """Send a command to a remote repeater using the MeshCore binary protocol.
 
@@ -1799,7 +1799,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             # Set capture target for _route_dm
             self._admin_query_target = pubkey_prefix
             self._admin_query_responses = []
-            logger.info("MeshCore: admin query START target=%s cmd=%s pw=%s",
+            logger.debug("MeshCore: admin query START target=%s cmd=%s pw=%s",
                         pubkey_prefix, command, "yes" if password else "no")
 
             try:
@@ -1807,15 +1807,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 # Always attempt login — even with empty password (guest-level access).
                 # Without login, the repeater ignores binary commands.
                 login_cmd = bytes([CMD_SEND_LOGIN]) + full_key + password.encode("utf-8")
-                logger.info("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
+                logger.debug("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
                 try:
                     pkt_type, payload = await self._conn.send_command(
                         login_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                    logger.info("MeshCore: admin query login result: 0x%02x", pkt_type)
+                    logger.debug("MeshCore: admin query login result: 0x%02x", pkt_type)
                     if pkt_type != PKT_MSG_SENT:
                         return {"success": False, "error": "Login rejected by node"}
                 except Exception as e:
-                    logger.info("MeshCore: admin query login exception: %s", e)
+                    logger.debug("MeshCore: admin query login exception: %s", e)
                     return {"success": False, "error": f"Login failed: {e}"}
 
                 # Wait for LOGIN_SUCCESS or LOGIN_FAILED
@@ -1831,11 +1831,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
                         )
                         if pkt_type == PKT_LOGIN_SUCCESS:
                             perms = payload[0] if payload else 0
-                            logger.info("MeshCore: admin query LOGIN SUCCESS perms=%d", perms)
+                            logger.debug("MeshCore: admin query LOGIN SUCCESS perms=%d", perms)
                             logged_in = True
                             break
                         elif pkt_type == PKT_LOGIN_FAILED:
-                            logger.info("MeshCore: admin query LOGIN FAILED")
+                            logger.debug("MeshCore: admin query LOGIN FAILED")
                             return {"success": False, "error": "Login rejected — wrong password or not authorized"}
                         elif pkt_type == PKT_NO_MORE_MSGS:
                             await asyncio.sleep(2.0)
@@ -1853,28 +1853,28 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     cmd_bytes = bytes([cmd_opcode]) + full_key + bytes([sub_type])
                     if extra_data:
                         cmd_bytes += extra_data
-                    logger.info("MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
+                    logger.debug("MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
                                  cmd_opcode, sub_type)
                 else:
                     # Fallback: text DM (will likely get "Unknown command")
                     ts = int(time.time())
                     cmd_bytes = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
                                 ts.to_bytes(4, "little") + full_key[:6] + command.encode("utf-8")
-                    logger.info("MeshCore: admin query sending text cmd (no binary mapping): %s",
+                    logger.debug("MeshCore: admin query sending text cmd (no binary mapping): %s",
                                  cmd_bytes.hex()[:40])
 
-                logger.info("MeshCore: admin query cmd bytes: %s", cmd_bytes.hex()[:60])
+                logger.debug("MeshCore: admin query cmd bytes: %s", cmd_bytes.hex()[:60])
                 try:
                     pkt_type, _ = await self._conn.send_command(
                         cmd_bytes, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                    logger.info("MeshCore: admin query cmd result: 0x%02x", pkt_type)
+                    logger.debug("MeshCore: admin query cmd result: 0x%02x", pkt_type)
                     if pkt_type != PKT_MSG_SENT:
                         return {"success": False, "error": "Node rejected send"}
                 except Exception as e:
-                    logger.info("MeshCore: admin query cmd exception: %s", e)
+                    logger.debug("MeshCore: admin query cmd exception: %s", e)
                     return {"success": False, "error": f"Send failed: {e}"}
 
-                logger.info("MeshCore: admin query starting poll, captured_so_far=%d",
+                logger.debug("MeshCore: admin query starting poll, captured_so_far=%d",
                             len(self._admin_query_responses))
 
                 # ── Poll for response ──
@@ -1894,22 +1894,22 @@ class MeshCoreAdapter(BasePlatformAdapter):
                              PKT_NO_MORE_MSGS, PKT_ERROR],
                             timeout=5.0,
                         )
-                        logger.info("MeshCore: admin poll got type=0x%02x payload=%s",
+                        logger.debug("MeshCore: admin poll got type=0x%02x payload=%s",
                                      pkt_type, payload[:40].hex() if payload else "empty")
 
                         if pkt_type == PKT_STATUS_RESPONSE:
                             # Status response: parse and format
-                            logger.info("MeshCore: admin poll STATUS_RESPONSE len=%d", len(payload) if payload else 0)
+                            logger.debug("MeshCore: admin poll STATUS_RESPONSE len=%d", len(payload) if payload else 0)
                             parsed = self._parse_status_response(payload, pubkey_prefix)
                             self._admin_query_responses.append(parsed)
                             continue
                         elif pkt_type == PKT_BINARY_RESPONSE:
-                            logger.info("MeshCore: admin poll BINARY_RESPONSE len=%d", len(payload) if payload else 0)
+                            logger.debug("MeshCore: admin poll BINARY_RESPONSE len=%d", len(payload) if payload else 0)
                             parsed = self._parse_binary_response(payload, pubkey_prefix)
                             self._admin_query_responses.append(parsed)
                             continue
                         elif pkt_type == PKT_TELEMETRY_RESPONSE:
-                            logger.info("MeshCore: admin poll TELEMETRY_RESPONSE len=%d", len(payload) if payload else 0)
+                            logger.debug("MeshCore: admin poll TELEMETRY_RESPONSE len=%d", len(payload) if payload else 0)
                             self._admin_query_responses.append(
                                 f"[TELEMETRY] {payload.hex() if payload else 'empty'}")
                             continue
@@ -1919,7 +1919,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                                 payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
                             msg_pk = msg.get("pubkey_prefix", "")
                             msg_text = msg.get("text", "")
-                            logger.info("MeshCore: admin poll DM from %s (target=%s) text=%s",
+                            logger.debug("MeshCore: admin poll DM from %s (target=%s) text=%s",
                                          msg_pk, pubkey_prefix, msg_text[:80] if msg_text else "(empty)")
                             if msg_pk.lower() == pubkey_prefix.lower() and msg_text:
                                 self._admin_query_responses.append(msg_text)
