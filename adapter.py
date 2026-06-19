@@ -638,6 +638,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             pass
 
         self._mark_connected()
+        # Set module-level adapter ref for tool handlers
+        import sys
+        sys.modules[__name__]._adapter_ref = self
         logger.info("MeshCore: connected (raw protocol), channels=%s, DMs=%s",
                     sorted(self.monitor_channels) if self.monitor_channels else "(discovery)",
                     "on" if self.enable_dms else "off")
