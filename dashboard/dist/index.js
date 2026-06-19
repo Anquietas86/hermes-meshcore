@@ -472,18 +472,40 @@
     var _g = useState([]), knownNodes = _g[0], setKnownNodes = _g[1];
 
     var COMMANDS = [
+      // Read-only info commands
+      { value: "ver", label: "ver — firmware version" },
+      { value: "board", label: "board — board name" },
+      { value: "clock", label: "clock — node time" },
       { value: "stats-core", label: "stats-core — CPU, battery, uptime" },
       { value: "stats-radio", label: "stats-radio — RF params, noise, RSSI" },
       { value: "stats-packets", label: "stats-packets — TX/RX counts" },
-      { value: "ver", label: "ver — firmware version" },
-      { value: "neighbors", label: "neighbors — visible nodes" },
-      { value: "clock", label: "clock — node time" },
+      { value: "neighbors", label: "neighbors — visible nodes (zero-hop)" },
+      { value: "advert", label: "advert — send advertisement now" },
       { value: "get name", label: "get name — node name" },
-      { value: "get lat", label: "get lat — latitude" },
-      { value: "get lon", label: "get lon — longitude" },
-      { value: "get role", label: "get role — node role" },
-      { value: "get repeat", label: "get repeat — repeater settings" },
-      { value: "all", label: "all — run all read-only commands" },
+      { value: "get radio", label: "get radio — freq, bw, sf, cr" },
+      { value: "get tx", label: "get tx — TX power (dBm)" },
+      { value: "get repeat", label: "get repeat — repeater on/off" },
+      { value: "get public.key", label: "get public.key — node public key" },
+      { value: "get advert.interval", label: "get advert.interval — advert interval" },
+      { value: "get owner.info", label: "get owner.info — owner info" },
+      { value: "get bridge.type", label: "get bridge.type — bridge type" },
+      { value: "gps", label: "gps — GPS status" },
+      { value: "region list allowed", label: "region list allowed — allowed regions" },
+      { value: "region list denied", label: "region list denied — denied regions" },
+      // Write/admin commands (require password)
+      { value: "set name", label: "set name <name> — set node name" },
+      { value: "set tx", label: "set tx <dBm> — set TX power" },
+      { value: "set repeat on", label: "set repeat on — enable repeating" },
+      { value: "set repeat off", label: "set repeat off — disable repeating" },
+      { value: "setperm", label: "setperm <key> <level> — set ACL permissions" },
+      { value: "reboot", label: "reboot — reboot device" },
+      { value: "clear stats", label: "clear stats — reset statistics" },
+      { value: "gps on", label: "gps on — enable GPS" },
+      { value: "gps off", label: "gps off — disable GPS" },
+      { value: "gps sync", label: "gps sync — sync time with GPS" },
+      { value: "gps setloc", label: "gps setloc — set position from GPS" },
+      { value: "powersaving on", label: "powersaving on — enable power saving" },
+      { value: "powersaving off", label: "powersaving off — disable power saving" },
     ];
 
     // Fetch known nodes on mount
