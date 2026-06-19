@@ -294,12 +294,32 @@
         var admin = data.admin || {};
         var hasContent = (admin.nodes && admin.nodes.length > 0) ||
                          (admin.channels && admin.channels.length > 0) ||
-                         (admin.require_mention_channels && admin.require_mention_channels.length > 0);
+                         (admin.require_mention_channels && admin.require_mention_channels.length > 0) ||
+                         (admin.allowed_users && admin.allowed_users.length > 0) ||
+                         admin.allow_all_users !== undefined;
         if (!hasContent) return null;
 
         return React.createElement(C.Card, null,
           React.createElement(C.CardContent, null,
             React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🔐 Admin Settings"),
+
+            // DM access policy
+            React.createElement("div", { style: { marginBottom: "0.75rem" } },
+              React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "DM Access Policy"),
+              React.createElement(StatRow, {
+                label: "Allow All Users",
+                value: admin.allow_all_users ? "✅ Yes — responds to everyone" : "❌ No — whitelist only",
+              })
+            ),
+
+            admin.allowed_users && admin.allowed_users.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
+              React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "Whitelisted Users"),
+              React.createElement("div", { className: "mc-tag-list" },
+                admin.allowed_users.map(function (u) {
+                  return React.createElement("span", { key: u, className: "mc-tag mc-tag-admin" }, u);
+                })
+              )
+            ),
 
             admin.nodes && admin.nodes.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
               React.createElement("div", { style: { fontSize: "0.8rem", color: "var(--color-muted)", marginBottom: "0.25rem" } }, "Authorised Admin Nodes"),

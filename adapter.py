@@ -548,6 +548,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         allowed_raw = os.getenv("MESHCORE_ALLOWED_USERS") or extra.get("allowed_users", "")
         self.allowed_users: Set[str] = {u.strip() for u in allowed_raw.split(",") if u.strip()}
+        self.allow_all: bool = os.getenv("MESHCORE_ALLOW_ALL_USERS", "").lower() == "true"
 
         self._conn: Optional[MeshCoreRawConnection] = None
         self._contacts: Dict[str, dict] = {}
@@ -848,6 +849,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     "nodes": sorted(self.admin_nodes) if self.admin_nodes else [],
                     "channels": sorted(self.admin_channels) if self.admin_channels else [],
                     "require_mention_channels": sorted(self.require_mention_channels) if self.require_mention_channels else [],
+                    "allow_all_users": self.allow_all,
+                    "allowed_users": sorted(self.allowed_users) if self.allowed_users else [],
                 },
                 "updated_at": time.time(),
             }
