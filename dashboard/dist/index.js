@@ -438,6 +438,7 @@
     var _c = useState(false), saving = _c[0], setSaving = _c[1];
     var _d = useState(false), restarting = _d[0], setRestarting = _d[1];
     var _e = useState(null), saveMsg = _e[0], setSaveMsg = _e[1];
+    var _h = useState(false), loading = _h[0], setLoading = _h[1];
 
     // Channel checkbox state: { chIndex: { monitor: bool, admin: bool, mention: bool } }
     var _f = useState({}), chChecks = _f[0], setChChecks = _f[1];
@@ -575,8 +576,12 @@
     }
 
     function handleLoad() {
+      console.log("handleLoad called");
+      setLoading(true);
+      setSaveMsg(null);
       api("/config")
         .then(function (d) {
+          console.log("Load config response:", d);
           setConfig(d);
           setEdits({});
           setSaveMsg("✅ Loaded current settings");
@@ -599,8 +604,11 @@
             allow_all_users: String(d.allow_all_users || "").toLowerCase() === "true",
             enable_dms: String(d.enable_dms || "").toLowerCase() === "true",
           });
+          setLoading(false);
         })
         .catch(function (e) {
+          console.error("Load config error:", e);
+          setLoading(false);
           setSaveMsg("❌ Load failed: " + String(e));
         });
     }
@@ -701,7 +709,8 @@
           React.createElement("button", {
             className: "mc-btn mc-btn-load",
             onClick: handleLoad,
-          }, "📋 Load Current"),
+            disabled: loading,
+          }, loading ? "Loading…" : "📋 Load Current"),
           React.createElement("button", {
             className: "mc-btn mc-btn-save",
             onClick: handleSave,
