@@ -321,19 +321,45 @@
         }
       `),
 
-      // ── Connection card ────────────────────────────────────────────
+      // ── Connection & Contacts card (merged) ──────────────────────────
       React.createElement(C.Card, null,
         React.createElement(C.CardContent, null,
-          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "📡 Connection"),
-          React.createElement("div", { className: "mc-conn-badge", style: { background: connColor + "20", color: connColor } }, connLabel),
-          React.createElement(StatRow, { label: "Host", value: escapeHtml(data.host) + ":" + (data.port || "—"), mono: true }),
-          data.channels && data.channels.length > 0 && React.createElement(StatRow, { label: "Channels", value: data.channels.join(", "), mono: true }),
-          React.createElement(StatRow, { label: "Last Message", value: formatTime(data.last_message_time), mono: true }),
-          React.createElement(StatRow, { label: "DMs", value: data.dms_enabled ? "✅ Enabled" : "❌ Disabled" })
+          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "📡 Connection & Contacts"),
+          // Connection section
+          React.createElement("div", { style: { marginBottom: "0.5rem" } },
+            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Gateway"),
+            React.createElement("div", { className: "mc-conn-badge", style: { background: connColor + "20", color: connColor } }, connLabel),
+            React.createElement(StatRow, { label: "Host", value: escapeHtml(data.host) + ":" + (data.port || "—"), mono: true }),
+            React.createElement(StatRow, { label: "Last Message", value: formatTime(data.last_message_time), mono: true }),
+            React.createElement(StatRow, { label: "DMs", value: data.dms_enabled ? "✅ Enabled" : "❌ Disabled" })
+          ),
+          // Contacts section
+          React.createElement("div", { style: { marginBottom: "0.5rem" } },
+            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Contacts (" + (contacts.total || 0) + ")"),
+            React.createElement("div", { className: "mc-contacts-summary" },
+              React.createElement("div", { className: "mc-contact-chip" }, "🔁 ", React.createElement("strong", null, contacts.repeaters || 0), " repeaters"),
+              React.createElement("div", { className: "mc-contact-chip" }, "📱 ", React.createElement("strong", null, contacts.clients || 0), " clients"),
+              React.createElement("div", { className: "mc-contact-chip" }, "🏠 ", React.createElement("strong", null, contacts.rooms || 0), " rooms")
+            )
+          ),
+          // Channels section
+          data.channels && data.channels.length > 0 && React.createElement("div", null,
+            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Channels (" + data.channels.length + ")"),
+            React.createElement("div", { className: "mc-channel-list" },
+              data.channels.map(function (ch) {
+                var names = data.channel_names || {};
+                var name = names[String(ch)] || "";
+                return React.createElement("div", { key: ch, className: "mc-channel-item" },
+                  React.createElement("span", { className: "mc-channel-name" }, name || ("Channel " + ch)),
+                  React.createElement("span", { className: "mc-channel-badge" }, "ch " + ch)
+                );
+              })
+            )
+          )
         )
       ),
 
-      // ── Node & Telemetry card (merged) ──────────────────────────────
+      // ── Node & Telemetry card ────────────────────────────────────────
       React.createElement(C.Card, null,
         React.createElement(C.CardContent, null,
           React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🖥️ Node & Telemetry"),
@@ -363,36 +389,6 @@
             React.createElement(StatRow, { label: "Uptime", value: uptimeStr(stats.uptime_s) }),
             React.createElement(StatRow, { label: "Packets", value: "TX: " + (stats.tx_packets ?? "—") + " / RX: " + (stats.rx_packets ?? "—"), mono: true }),
             React.createElement(StatRow, { label: "Signal", value: "Noise: " + (stats.noise ?? "—") + " | RSSI: " + (stats.rssi ?? "—") + " | SNR: " + (stats.snr != null ? stats.snr + "dB" : "—"), mono: true })
-          )
-        )
-      ),
-
-      // ── Contacts & Channels card (merged) ────────────────────────────
-      React.createElement(C.Card, null,
-        React.createElement(C.CardContent, null,
-          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "👥 Contacts & Channels"),
-          // Contacts section
-          React.createElement("div", { style: { marginBottom: "0.5rem" } },
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Contacts (" + (contacts.total || 0) + ")"),
-            React.createElement("div", { className: "mc-contacts-summary" },
-              React.createElement("div", { className: "mc-contact-chip" }, "🔁 ", React.createElement("strong", null, contacts.repeaters || 0), " repeaters"),
-              React.createElement("div", { className: "mc-contact-chip" }, "📱 ", React.createElement("strong", null, contacts.clients || 0), " clients"),
-              React.createElement("div", { className: "mc-contact-chip" }, "🏠 ", React.createElement("strong", null, contacts.rooms || 0), " rooms")
-            )
-          ),
-          // Channels section
-          data.channels && data.channels.length > 0 && React.createElement("div", null,
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Channels (" + data.channels.length + ")"),
-            React.createElement("div", { className: "mc-channel-list" },
-              data.channels.map(function (ch) {
-                var names = data.channel_names || {};
-                var name = names[String(ch)] || "";
-                return React.createElement("div", { key: ch, className: "mc-channel-item" },
-                  React.createElement("span", { className: "mc-channel-name" }, name || ("Channel " + ch)),
-                  React.createElement("span", { className: "mc-channel-badge" }, "ch " + ch)
-                );
-              })
-            )
           )
         )
       ),
