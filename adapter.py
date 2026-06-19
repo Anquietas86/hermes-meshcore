@@ -564,6 +564,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._stats_refresh_task: Optional[asyncio.Task] = None
         self._stats_cache: Dict[str, Any] = {}
         self._admin_query_lock: asyncio.Lock = asyncio.Lock()  # prevents poll/keepalive during admin queries
+        # Admin query response capture: when set, _route_unsolicited captures
+        # DMs from this pubkey prefix into _admin_query_responses instead of
+        # routing them to the agent. Prevents send_command's unsolicited handler
+        # from stealing repeater CLI responses before the admin query sees them.
+        self._admin_query_target: str = ""  # pubkey prefix to capture
+        self._admin_query_responses: List[str] = []  # captured responses
         # Deduplication: prevent double-delivery when a message arrives as
         # unsolicited during a poll command's wait and then again as the
         # poll response. Keys: "dm:{pubkey}:{ts}" / "ch:{idx}:{sender}:{ts}"
@@ -731,10 +737,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         that arrive during command waits."""
         if pkt_type == PKT_CONTACT_MSG_RECV:
             msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=False)
-            await self._handle_direct_message(msg)
+            await self._route_dm(msg)
         elif pkt_type == PKT_CONTACT_MSG_RECV_V3:
             msg = MeshCoreRawConnection.parse_contact_msg(payload, is_v3=True)
-            await self._handle_direct_message(msg)
+            await self._route_dm(msg)
         elif pkt_type == PKT_CHANNEL_MSG_RECV:
             msg = MeshCoreRawConnection.parse_channel_msg(payload, is_v3=False)
             await self._handle_channel_message(msg)
@@ -748,6 +754,18 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 self._contacts[pubkey] = c
                 logger.info("MeshCore: new contact: %s", c.get("adv_name", pubkey[:12]))
         # ACK, MESSAGES_WAITING, ADVERTISEMENT — silently consumed
+
+    async def _route_dm(self, msg: dict) -> None:
+        """Route a DM: capture for admin query if target matches, else handle normally."""
+        pubkey_prefix = msg.get("pubkey_prefix", "")
+        if self._admin_query_target and pubkey_prefix.lower() == self._admin_query_target.lower():
+            text = msg.get("text", "")
+            if text:
+                self._admin_query_responses.append(text)
+                logger.debug("MeshCore: admin query captured response from %s: %s",
+                             pubkey_prefix, text[:60])
+            return
+        await self._handle_direct_message(msg)
 
     # ── Poll loop ─────────────────────────────────────────────────────────
 
@@ -1579,70 +1597,73 @@ class MeshCoreAdapter(BasePlatformAdapter):
             pubkey_prefix = pubkey[:12]
             dst_bytes = bytes.fromhex(pubkey)[:6]
 
-            # Send auth DM if password provided
-            if password:
-                ts = int(time.time())
-                auth_cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
-                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
-                try:
-                    await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                except Exception:
-                    pass
+            # Set capture target — _route_dm will capture DMs from this
+            # pubkey prefix into _admin_query_responses instead of routing
+            # them to the agent. This prevents send_command's unsolicited
+            # handler from stealing repeater CLI responses.
+            self._admin_query_target = pubkey_prefix
+            self._admin_query_responses = []
 
-            # Send the command DM
-            ts = int(time.time())
-            cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
-                  ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
             try:
-                pkt_type, _ = await self._conn.send_command(
-                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                if pkt_type != PKT_MSG_SENT:
-                    return {"success": False, "error": "Node rejected send"}
-            except Exception as e:
-                return {"success": False, "error": f"Send failed: {e}"}
+                # Send auth DM if password provided
+                if password:
+                    ts = int(time.time())
+                    auth_cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
+                              ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+                    try:
+                        await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                    except Exception:
+                        pass
 
-            # Poll for DM responses from the target repeater.
-            # This blocks the poll loop (both use send_command → same lock),
-            # but 15-30s is acceptable for occasional admin queries.
-            responses = []
-            deadline = time.time() + timeout
-            while time.time() < deadline:
+                # Send the command DM
+                ts = int(time.time())
+                cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
+                      ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
                 try:
-                    pkt_type, payload = await self._conn.send_command(
-                        b"\x0A",
-                        [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
-                         PKT_NO_MORE_MSGS, PKT_ERROR],
-                        timeout=5.0,
-                    )
-                    if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
-                        msg = MeshCoreRawConnection.parse_contact_msg(
-                            payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
-                        # Only collect responses from our target
-                        msg_pk = msg.get("pubkey_prefix", "")
-                        if msg_pk.lower() == pubkey_prefix.lower():
-                            text = msg.get("text", "")
-                            if text:
-                                responses.append(text)
-                    elif pkt_type == PKT_NO_MORE_MSGS:
-                        await asyncio.sleep(2.0)
-                        continue
-                    elif pkt_type == PKT_ERROR:
-                        break
-                except Exception:
-                    await asyncio.sleep(2.0)
+                    pkt_type, _ = await self._conn.send_command(
+                        cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                    if pkt_type != PKT_MSG_SENT:
+                        return {"success": False, "error": "Node rejected send"}
+                except Exception as e:
+                    return {"success": False, "error": f"Send failed: {e}"}
 
-            return {
-                "success": True,
-                "responses": responses,
-                "node": {
-                    "name": contact.get("adv_name", ""),
-                    "pubkey_prefix": pubkey_prefix,
-                    "type": contact.get("type"),
-                    "lat": contact.get("adv_lat"),
-                    "lon": contact.get("adv_lon"),
-                    "last_advert": contact.get("last_advert"),
-                },
-            }
+                # Poll for responses. The capture mechanism in _route_dm
+                # collects matching DMs into _admin_query_responses as they
+                # arrive during send_command's unsolicited handling.
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    try:
+                        pkt_type, _ = await self._conn.send_command(
+                            b"\x0A",
+                            [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                             PKT_NO_MORE_MSGS, PKT_ERROR],
+                            timeout=5.0,
+                        )
+                        if pkt_type == PKT_NO_MORE_MSGS:
+                            await asyncio.sleep(2.0)
+                            continue
+                        elif pkt_type == PKT_ERROR:
+                            break
+                        # If we got a DM response directly (not captured),
+                        # it's already in _admin_query_responses via _route_dm
+                    except Exception:
+                        await asyncio.sleep(2.0)
+
+                return {
+                    "success": True,
+                    "responses": list(self._admin_query_responses),
+                    "node": {
+                        "name": contact.get("adv_name", ""),
+                        "pubkey_prefix": pubkey_prefix,
+                        "type": contact.get("type"),
+                        "lat": contact.get("adv_lat"),
+                        "lon": contact.get("adv_lon"),
+                        "last_advert": contact.get("last_advert"),
+                    },
+                }
+            finally:
+                self._admin_query_target = ""
+                self._admin_query_responses = []
 
     async def get_contact_details(self, name: str) -> Dict[str, Any]:
         """Get full details for a contact by name or pubkey prefix."""
