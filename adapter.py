@@ -16,7 +16,7 @@ Configuration via environment variables::
     MESHCORE_HOST=192.168.0.141
     MESHCORE_PORT=5000
     MESHCORE_BOT_NAME=meshcore-bot
-    MESHCORE_ADMIN_NODES=bba647077b2c
+    MESHCORE_ADMIN_NODES=your-pubkey-prefix
     MESHCORE_MONITOR_CHANNELS=1
     MESHCORE_ENABLE_DMS=true
 """

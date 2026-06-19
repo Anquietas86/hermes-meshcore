@@ -17,6 +17,9 @@ standard library only.
 - **Admin channels** — mark trusted channels for sensitive replies
 - **Radio metadata** — RSSI, SNR, hops, and path info injected into channel context
 - **Self-healing** — silence watchdog with automatic reconnect, stale frame drain
+- **Remote repeater admin** — query remote repeaters via CLI commands over the mesh (`meshcore_admin` tool)
+- **Contact lookup** — instant node details from the contact cache (`meshcore_contact` tool)
+- **Password auth** — admin password support for repeaters that require authentication
 
 ## Quick Install
 
@@ -36,11 +39,11 @@ MESHCORE_HOST=192.168.0.141
 MESHCORE_PORT=5000
 
 # Recommended
-MESHCORE_ADMIN_NODES=bba647077b2c     # Your node's pubkey prefix
-MESHCORE_HOME_CHANNEL=dm:bba647077b2c # Where cron/notifications go
+MESHCORE_ADMIN_NODES=your-pubkey-prefix     # Your node's pubkey prefix
+MESHCORE_HOME_CHANNEL=dm:your-pubkey-prefix # Where cron/notifications go
 MESHCORE_MONITOR_CHANNELS=1           # Channels to respond in (empty = discover only)
 MESHCORE_ENABLE_DMS=true
-MESHCORE_ALLOWED_USERS=bba647077b2c,channel:1  # Who can talk (DMs by pubkey, channels by index)
+MESHCORE_ALLOWED_USERS=your-pubkey-prefix,channel:1  # Who can talk (DMs by pubkey, channels by index)
 
 # Optional
 MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
@@ -83,7 +86,7 @@ DMs and channels use different identity models:
 |---|---|---|
 | **Identity** | `pubkey_prefix` (cryptographic) | `channel:<idx>` (stable synthetic) |
 | **Admin check** | `MESHCORE_ADMIN_NODES` | `MESHCORE_ADMIN_CHANNELS` |
-| **Allowlist** | `MESHCORE_ALLOWED_USERS=bba647077b2c` | `MESHCORE_ALLOWED_USERS=channel:3` |
+| **Allowlist** | `MESHCORE_ALLOWED_USERS=your-pubkey-prefix` | `MESHCORE_ALLOWED_USERS=channel:3` |
 
 Display names are not used for auth — they're mutable and ambiguous.
 Use `channel:<idx>` in `MESHCORE_ALLOWED_USERS` to trust an entire channel.
