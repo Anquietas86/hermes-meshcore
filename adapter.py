@@ -1689,17 +1689,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
                              PKT_NO_MORE_MSGS, PKT_ERROR],
                             timeout=5.0,
                         )
-                        logger.debug("MeshCore: admin poll got type=0x%02x payload=%s",
+                        logger.info("MeshCore: admin poll got type=0x%02x payload=%s",
                                      pkt_type, payload[:30].hex() if payload else "empty")
                         if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
                             # Direct poll response — bypassed _route_dm, parse manually
                             msg = MeshCoreRawConnection.parse_contact_msg(
                                 payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
                             msg_pk = msg.get("pubkey_prefix", "")
+                            msg_text = msg.get("text", "")
+                            logger.info("MeshCore: admin poll DM from %s (target=%s) text=%s",
+                                         msg_pk, pubkey_prefix, msg_text[:80] if msg_text else "(empty)")
                             if msg_pk.lower() == pubkey_prefix.lower():
-                                text = msg.get("text", "")
-                                if text:
-                                    self._admin_query_responses.append(text)
+                                if msg_text:
+                                    self._admin_query_responses.append(msg_text)
                             continue
                         elif pkt_type == PKT_NO_MORE_MSGS:
                             await asyncio.sleep(2.0)

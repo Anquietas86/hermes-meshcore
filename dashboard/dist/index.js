@@ -355,8 +355,15 @@
         }
         .mc-admin-row {
           display: flex;
-          gap: 0.35rem;
-          align-items: center;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .mc-admin-row select,
+        .mc-admin-row input {
+          width: 100%;
+        }
+        .mc-admin-row button {
+          align-self: flex-start;
         }
         .mc-admin-result {
           margin-top: 0.5rem;
