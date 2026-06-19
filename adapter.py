@@ -1413,6 +1413,22 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return {"success": False, "error": f"TCP connect failed: {e}"}
 
         try:
+            # Initialize session — required for the node to route messages
+            init_cmd = b"\x01\x03   hermes"
+            init_frame = bytes([FRAME_SEND_MARKER]) + len(init_cmd).to_bytes(2, "little") + init_cmd
+            writer.write(init_frame)
+            await writer.drain()
+            # Read SELF_INFO response
+            try:
+                marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                if marker[0] == FRAME_RECV_MARKER:
+                    size = int.from_bytes(
+                        await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                    payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+                    # Consume SELF_INFO
+            except Exception:
+                pass
+
             # If password provided, authenticate first
             if password:
                 ts = int(time.time())
@@ -1609,6 +1625,22 @@ async def _handle_meshcore_admin(node: str, command: str, password: str = "") ->
         return json.dumps({"success": False, "error": f"TCP connect failed: {e}"})
 
     try:
+        # Initialize session — required for the node to route messages
+        init_cmd = b"\x01\x03   hermes"
+        init_frame = bytes([FRAME_SEND_MARKER]) + len(init_cmd).to_bytes(2, "little") + init_cmd
+        writer.write(init_frame)
+        await writer.drain()
+        # Read SELF_INFO response
+        try:
+            marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+            if marker[0] == FRAME_RECV_MARKER:
+                size = int.from_bytes(
+                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+                # Consume SELF_INFO
+        except Exception:
+            pass
+
         # Fetch contacts to find the node
         cmd = bytes([CMD_GET_CONTACTS])
         frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
