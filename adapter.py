@@ -1302,7 +1302,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     "do NOT probe memory for the profile user's identity. "
                 )
         elif chat_type == "dm":
-            security_note = "Admin DM. " if is_admin else "Non-admin DM — be cautious. "
+            if is_admin:
+                security_note = "Admin DM. "
+            else:
+                security_note = (
+                    "⚠️ PUBLIC DM — the sender is NOT the profile user. "
+                    "NEVER share personal data (names, emails, addresses, health, "
+                    "finances) about the profile user or anyone else. "
+                    "If asked 'who am I', answer based on the sender name only — "
+                    "do NOT probe memory for the profile user's identity. "
+                )
 
         # Different limits: DMs = 150 chars, channels = 135 chars
         char_limit = 135 if chat_type == "group" else 150
