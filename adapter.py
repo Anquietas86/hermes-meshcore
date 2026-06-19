@@ -68,6 +68,21 @@ CMD_RESET_PATH = 0x0D
 CMD_GET_SELF_TELEMETRY = 0x27
 CMD_SET_OTHER_PARAMS = 0x26
 CMD_SEND_LOGIN = 0x1a  # Login to remote repeater/room server
+CMD_BINARY_REQ = 0x32   # Send binary request to remote node
+CMD_SEND_ANON_REQ = 0x39  # Send anonymous request to remote node
+
+# Binary request types (sub-opcodes for CMD_BINARY_REQ)
+BINREQ_STATUS = 0x01      # Request status from repeater
+BINREQ_KEEP_ALIVE = 0x02  # Keep-alive ping
+BINREQ_TELEMETRY = 0x03   # Request telemetry data
+BINREQ_MMA = 0x04         # Message metadata archive
+BINREQ_ACL = 0x05         # Request access control list
+BINREQ_NEIGHBOURS = 0x06  # Request neighbour list
+
+# Anonymous request types (sub-opcodes for CMD_SEND_ANON_REQ)
+ANONREQ_REGIONS = 0x01    # Request regions list
+ANONREQ_OWNER = 0x02      # Request owner information
+ANONREQ_BASIC = 0x03      # Request basic info (remote clock)
 
 # Response packet types
 PKT_OK = 0x00
@@ -90,6 +105,8 @@ PKT_STATS = 0x18
 PKT_TELEMETRY_RESPONSE = 0x8B
 PKT_LOGIN_SUCCESS = 0x85  # Remote login accepted
 PKT_LOGIN_FAILED = 0x86   # Remote login rejected
+PKT_STATUS_RESPONSE = 0x87  # Status response from remote node
+PKT_BINARY_RESPONSE = 0x8C  # Binary response from remote node
 
 # Stats sub-types
 STATS_TYPE_CORE = 0x00
@@ -1576,17 +1593,53 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def query_remote_repeater(self, name: str, command: str,
                                      timeout: float = 30.0,
                                      password: str = "") -> Dict[str, Any]:
-        """Send a CLI command to a remote repeater via DM using the gateway's
-        existing TCP connection. Blocks the poll loop briefly (15-30s) while
-        waiting for the response — acceptable for occasional admin queries.
+        """Send a command to a remote repeater using the MeshCore binary protocol.
 
-        Guest password is blank by default — read-only commands (ver, stats-*,
-        get *, neighbors, clock) work without auth. Write commands require
-        admin password. If password is provided, sends 'password <pw>' first.
+        Text CLI commands (stats-core, ver, neighbors) only work over serial/UART.
+        Over the mesh, repeaters only process binary protocol commands via
+        CMD_BINARY_REQ (0x32) or CMD_SEND_ANON_REQ (0x39) with dedicated sub-opcodes.
+
+        Command mapping:
+          stats-core, ver, board, get name, get public.key, gps → BINREQ_STATUS
+          stats-radio, stats-packets → BINREQ_TELEMETRY
+          neighbors → BINREQ_NEIGHBOURS
+          clock → ANONREQ_BASIC
+          get owner.info → ANONREQ_OWNER
+          region list * → ANONREQ_REGIONS
+          req_acl → BINREQ_ACL
+          Unmapped commands fall back to text DM (will get "Unknown command").
 
         Returns {"success": True, "responses": [...], "node": {...}} or
         {"success": False, "error": "..."}.
         """
+        # Map command names to (opcode, sub_type, extra_data) tuples
+        BINARY_COMMAND_MAP = {
+            # Binary requests (CMD_BINARY_REQ)
+            "stats-core":     (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "stats-radio":    (CMD_BINARY_REQ, BINREQ_TELEMETRY, None),
+            "stats-packets":  (CMD_BINARY_REQ, BINREQ_TELEMETRY, None),
+            "ver":            (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "board":          (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "neighbors":      (CMD_BINARY_REQ, BINREQ_NEIGHBOURS,
+                               b"\x00\xff\x00\x00\x00\x04" + os.urandom(4)),
+            "get name":       (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "get public.key": (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "gps":            (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "req_acl":        (CMD_BINARY_REQ, BINREQ_ACL, b"\x00\x00"),
+            "req_status":     (CMD_BINARY_REQ, BINREQ_STATUS, None),
+            "req_neighbours": (CMD_BINARY_REQ, BINREQ_NEIGHBOURS,
+                               b"\x00\xff\x00\x00\x00\x04" + os.urandom(4)),
+            "req_telemetry":  (CMD_BINARY_REQ, BINREQ_TELEMETRY, None),
+            # Anonymous requests (CMD_SEND_ANON_REQ)
+            "clock":           (CMD_SEND_ANON_REQ, ANONREQ_BASIC, None),
+            "get owner.info":  (CMD_SEND_ANON_REQ, ANONREQ_OWNER, None),
+            "req_owner":       (CMD_SEND_ANON_REQ, ANONREQ_OWNER, None),
+            "req_clock":       (CMD_SEND_ANON_REQ, ANONREQ_BASIC, None),
+            "region list allowed": (CMD_SEND_ANON_REQ, ANONREQ_REGIONS, None),
+            "region list denied":  (CMD_SEND_ANON_REQ, ANONREQ_REGIONS, None),
+            "req_regions":     (CMD_SEND_ANON_REQ, ANONREQ_REGIONS, None),
+        }
+
         if not self._conn or not self._conn.is_connected:
             return {"success": False, "error": "Gateway not connected to node"}
 
@@ -1598,25 +1651,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
             pubkey = contact["public_key"]
             pubkey_prefix = pubkey[:12]
-            dst_bytes = bytes.fromhex(pubkey)[:6]
+            full_key = bytes.fromhex(pubkey)  # 32 bytes
 
-            # Set capture target — _route_dm will capture DMs from this
-            # pubkey prefix into _admin_query_responses instead of routing
-            # them to the agent. This prevents send_command's unsolicited
-            # handler from stealing repeater CLI responses.
+            # Set capture target for _route_dm
             self._admin_query_target = pubkey_prefix
             self._admin_query_responses = []
             logger.info("MeshCore: admin query START target=%s cmd=%s pw=%s",
                         pubkey_prefix, command, "yes" if password else "no")
 
             try:
-                # Send proper login request (opcode 0x1a) with full 32-byte public key.
-                # This is the same protocol the HA integration and meshcore-cli use —
-                # the companion node sends a login request over the mesh, the repeater
-                # authenticates it and establishes a session. Without this, the repeater
-                # ignores all subsequent commands.
+                # ── Login (required for all binary commands) ──
                 if password:
-                    full_key = bytes.fromhex(pubkey)  # 32 bytes
                     login_cmd = bytes([CMD_SEND_LOGIN]) + full_key + password.encode("utf-8")
                     logger.info("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
                     try:
@@ -1629,8 +1674,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                         logger.info("MeshCore: admin query login exception: %s", e)
                         return {"success": False, "error": f"Login failed: {e}"}
 
-                    # Wait for LOGIN_SUCCESS or LOGIN_FAILED response from the repeater.
-                    # This arrives as an unsolicited frame during subsequent commands.
+                    # Wait for LOGIN_SUCCESS or LOGIN_FAILED
                     login_deadline = time.time() + 15.0
                     logged_in = False
                     while time.time() < login_deadline:
@@ -1657,14 +1701,28 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     if not logged_in:
                         return {"success": False, "error": "Login timed out — no response from repeater"}
 
-                # Send the command DM (txt_type=1 = command, matching meshcore_py send_cmd)
-                ts = int(time.time())
-                cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
-                      ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
-                logger.info("MeshCore: admin query sending cmd: %s", cmd.hex()[:40])
+                # ── Send the command ──
+                mapping = BINARY_COMMAND_MAP.get(command)
+                if mapping:
+                    cmd_opcode, sub_type, extra_data = mapping
+                    # Build binary request: opcode + 32-byte key + sub_type + extra_data
+                    cmd_bytes = bytes([cmd_opcode]) + full_key + bytes([sub_type])
+                    if extra_data:
+                        cmd_bytes += extra_data
+                    logger.info("MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
+                                 cmd_opcode, sub_type)
+                else:
+                    # Fallback: text DM (will likely get "Unknown command")
+                    ts = int(time.time())
+                    cmd_bytes = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
+                                ts.to_bytes(4, "little") + full_key[:6] + command.encode("utf-8")
+                    logger.info("MeshCore: admin query sending text cmd (no binary mapping): %s",
+                                 cmd_bytes.hex()[:40])
+
+                logger.info("MeshCore: admin query cmd bytes: %s", cmd_bytes.hex()[:60])
                 try:
                     pkt_type, _ = await self._conn.send_command(
-                        cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                        cmd_bytes, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
                     logger.info("MeshCore: admin query cmd result: 0x%02x", pkt_type)
                     if pkt_type != PKT_MSG_SENT:
                         return {"success": False, "error": "Node rejected send"}
@@ -1675,33 +1733,52 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 logger.info("MeshCore: admin query starting poll, captured_so_far=%d",
                             len(self._admin_query_responses))
 
-                # Poll for responses. The capture mechanism in _route_dm
-                # collects matching DMs into _admin_query_responses as they
-                # arrive during send_command's unsolicited handling.
-                # But responses can also arrive as the DIRECT poll response
-                # (bypassing _route_dm) — we must handle both paths.
+                # ── Poll for response ──
+                # Binary responses arrive as push notifications:
+                #   PKT_STATUS_RESPONSE (0x87) for BINREQ_STATUS
+                #   PKT_BINARY_RESPONSE (0x8C) for other binary/anonymous requests
+                #   PKT_TELEMETRY_RESPONSE (0x8B) for BINREQ_TELEMETRY
+                # Text responses arrive as PKT_CONTACT_MSG_RECV (0x07/0x10)
                 deadline = time.time() + timeout
                 while time.time() < deadline:
                     try:
                         pkt_type, payload = await self._conn.send_command(
                             b"\x0A",
-                            [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                            [PKT_STATUS_RESPONSE, PKT_BINARY_RESPONSE,
+                             PKT_TELEMETRY_RESPONSE,
+                             PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
                              PKT_NO_MORE_MSGS, PKT_ERROR],
                             timeout=5.0,
                         )
                         logger.info("MeshCore: admin poll got type=0x%02x payload=%s",
-                                     pkt_type, payload[:30].hex() if payload else "empty")
-                        if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
-                            # Direct poll response — bypassed _route_dm, parse manually
+                                     pkt_type, payload[:40].hex() if payload else "empty")
+
+                        if pkt_type == PKT_STATUS_RESPONSE:
+                            # Status response: parse and format
+                            logger.info("MeshCore: admin poll STATUS_RESPONSE len=%d", len(payload) if payload else 0)
+                            self._admin_query_responses.append(
+                                f"[STATUS] {payload.hex() if payload else 'empty'}")
+                            continue
+                        elif pkt_type == PKT_BINARY_RESPONSE:
+                            logger.info("MeshCore: admin poll BINARY_RESPONSE len=%d", len(payload) if payload else 0)
+                            self._admin_query_responses.append(
+                                f"[BINARY] {payload.hex() if payload else 'empty'}")
+                            continue
+                        elif pkt_type == PKT_TELEMETRY_RESPONSE:
+                            logger.info("MeshCore: admin poll TELEMETRY_RESPONSE len=%d", len(payload) if payload else 0)
+                            self._admin_query_responses.append(
+                                f"[TELEMETRY] {payload.hex() if payload else 'empty'}")
+                            continue
+                        elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                            # Text DM response (fallback path)
                             msg = MeshCoreRawConnection.parse_contact_msg(
                                 payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
                             msg_pk = msg.get("pubkey_prefix", "")
                             msg_text = msg.get("text", "")
                             logger.info("MeshCore: admin poll DM from %s (target=%s) text=%s",
                                          msg_pk, pubkey_prefix, msg_text[:80] if msg_text else "(empty)")
-                            if msg_pk.lower() == pubkey_prefix.lower():
-                                if msg_text:
-                                    self._admin_query_responses.append(msg_text)
+                            if msg_pk.lower() == pubkey_prefix.lower() and msg_text:
+                                self._admin_query_responses.append(msg_text)
                             continue
                         elif pkt_type == PKT_NO_MORE_MSGS:
                             await asyncio.sleep(2.0)
