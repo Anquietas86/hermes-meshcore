@@ -23,6 +23,7 @@ Configuration via environment variables::
 
 import asyncio
 import io
+import json
 import logging
 import os
 import struct
@@ -1352,6 +1353,229 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 stats[f"{name}_error"] = str(e)
         return stats
 
+    # ── Remote repeater admin ──────────────────────────────────────────────
+
+    async def _find_contact_by_name(self, name: str) -> Optional[dict]:
+        """Fuzzy-search contacts by name substring. Returns the best match."""
+        name_lower = name.lower()
+        # Exact match first
+        for c in self._contacts.values():
+            if c.get("adv_name", "").lower() == name_lower:
+                return c
+        # Substring match
+        candidates = []
+        for c in self._contacts.values():
+            adv = c.get("adv_name", "").lower()
+            if name_lower in adv:
+                candidates.append((len(adv) - len(name_lower), c))
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        # Pubkey prefix match
+        for pk, c in self._contacts.items():
+            if pk.lower().startswith(name_lower):
+                return c
+        return None
+
+    async def query_remote_repeater(self, name: str, command: str,
+                                     timeout: float = 30.0) -> Dict[str, Any]:
+        """Send a CLI command to a remote repeater via DM and collect responses.
+
+        Opens a SEPARATE TCP connection so it doesn't interfere with the
+        gateway's poll loop. The companion node accepts multiple connections.
+
+        Guest password is blank by default — read-only commands (ver, stats-*,
+        get *, neighbors, clock) work without auth. Write commands require
+        admin password.
+
+        Returns {"success": True, "responses": [...], "node": {...}} or
+        {"success": False, "error": "..."}.
+        """
+        contact = await self._find_contact_by_name(name)
+        if contact is None:
+            return {"success": False, "error": f"Node not found: {name}"}
+
+        pubkey = contact["public_key"]
+        pubkey_prefix = pubkey[:12]
+        dst_bytes = bytes.fromhex(pubkey)[:6]
+
+        # Open a fresh connection for this query
+        try:
+            reader, writer = await asyncio.open_connection(self.host, self.port)
+        except Exception as e:
+            return {"success": False, "error": f"TCP connect failed: {e}"}
+
+        try:
+            # Send the command as a DM
+            timestamp = int(time.time())
+            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                  timestamp.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
+            frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
+            writer.write(frame)
+            await writer.drain()
+
+            # Poll for responses
+            responses = []
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                # Send poll command
+                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
+                writer.write(poll)
+                await writer.drain()
+
+                # Read response frame
+                try:
+                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                except asyncio.TimeoutError:
+                    continue
+                if marker[0] != FRAME_RECV_MARKER:
+                    continue
+                size = int.from_bytes(
+                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+
+                pkt_type = payload[0]
+                pkt_data = payload[1:]
+
+                if pkt_type == PKT_NO_MORE_MSGS:
+                    await asyncio.sleep(2.0)
+                    continue
+                elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                    msg = MeshCoreRawConnection.parse_contact_msg(
+                        pkt_data, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
+                    text = msg.get("text", "")
+                    if text:
+                        responses.append(text)
+                elif pkt_type == PKT_ERROR:
+                    break
+
+            return {
+                "success": True,
+                "responses": responses,
+                "node": {
+                    "name": contact.get("adv_name", ""),
+                    "pubkey_prefix": pubkey_prefix,
+                    "type": contact.get("type"),
+                    "lat": contact.get("adv_lat"),
+                    "lon": contact.get("adv_lon"),
+                    "last_advert": contact.get("last_advert"),
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+            except Exception:
+                pass
+
+    async def get_contact_details(self, name: str) -> Dict[str, Any]:
+        """Get full details for a contact by name or pubkey prefix."""
+        contact = await self._find_contact_by_name(name)
+        if contact is None:
+            return {"success": False, "error": f"Node not found: {name}"}
+
+        type_names = {0: "unknown", 1: "client", 2: "repeater", 3: "room"}
+        ctype = contact.get("type")
+        return {
+            "success": True,
+            "name": contact.get("adv_name", ""),
+            "pubkey": contact.get("public_key", ""),
+            "pubkey_prefix": contact.get("public_key", "")[:12],
+            "type": ctype,
+            "type_name": type_names.get(ctype, "unknown") if ctype is not None else "unknown",
+            "flags": contact.get("flags"),
+            "out_path_len": contact.get("out_path_len"),
+            "out_path_hash_mode": contact.get("out_path_hash_mode"),
+            "out_path": contact.get("out_path", ""),
+            "lat": contact.get("adv_lat"),
+            "lon": contact.get("adv_lon"),
+            "last_advert": contact.get("last_advert"),
+            "lastmod": contact.get("lastmod"),
+        }
+
+
+# ── Tool handlers (module-level, adapter ref set during register) ──────────
+
+_adapter_ref: Optional["MeshCoreAdapter"] = None
+
+MESHCORE_ADMIN_SCHEMA = {
+    "name": "meshcore_admin",
+    "description": (
+        "Query a remote MeshCore repeater or node by sending CLI commands over the mesh. "
+        "Opens a separate TCP connection so it doesn't interfere with the gateway. "
+        "Guest password is blank by default — read-only commands work without auth. "
+        "Supported commands: ver, stats-core, stats-radio, stats-packets, get name, "
+        "get lat, get lon, get role, get repeat, get guest.password, get owner.info, "
+        "neighbors, clock. Use 'all' to run all read-only commands at once."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "node": {
+                "type": "string",
+                "description": "Node name or pubkey prefix to query (e.g. 'SA-VK5RMB-MT', 'Tungkillo', 'RF-Highbury-RPT')"
+            },
+            "command": {
+                "type": "string",
+                "description": "CLI command to send (e.g. 'ver', 'stats-core', 'neighbors', 'all' for all read-only commands)"
+            },
+        },
+        "required": ["node", "command"],
+    },
+}
+
+MESHCORE_CONTACT_SCHEMA = {
+    "name": "meshcore_contact",
+    "description": (
+        "Get detailed information about a MeshCore contact/node from the local contact cache. "
+        "Returns name, pubkey, type (client/repeater/room), location (lat/lon), "
+        "last advert time, and cached routing path. No mesh traffic — instant lookup."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Node name or pubkey prefix to look up (e.g. 'SA-VK5RMB-MT', 'Tungkillo', 'RF-Highbury-RPT')"
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+ALL_READONLY_COMMANDS = [
+    "ver", "stats-core", "stats-radio", "stats-packets",
+    "get name", "get lat", "get lon", "get role", "get repeat",
+    "get guest.password", "get owner.info", "neighbors", "clock",
+]
+
+
+async def _handle_meshcore_admin(node: str, command: str) -> str:
+    """Handler for meshcore_admin tool."""
+    if _adapter_ref is None:
+        return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
+
+    if command == "all":
+        all_results = {}
+        for cmd in ALL_READONLY_COMMANDS:
+            result = await _adapter_ref.query_remote_repeater(node, cmd, timeout=15.0)
+            all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
+        return json.dumps({"success": True, "node": node, "results": all_results})
+
+    result = await _adapter_ref.query_remote_repeater(node, command)
+    return json.dumps(result)
+
+
+async def _handle_meshcore_contact(name: str) -> str:
+    """Handler for meshcore_contact tool."""
+    if _adapter_ref is None:
+        return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
+
+    result = await _adapter_ref.get_contact_details(name)
+    return json.dumps(result)
+
 
 # ── Plugin registration ───────────────────────────────────────────────────
 
@@ -1424,9 +1648,18 @@ def interactive_setup():
     print_success("Saved to ~/.hermes/.env")
 
 def register(ctx):
+    # Wrap adapter factory to capture the instance for tool handlers
+    _orig_factory = lambda cfg: MeshCoreAdapter(cfg)
+
+    def _factory_with_ref(cfg):
+        global _adapter_ref
+        adapter = _orig_factory(cfg)
+        _adapter_ref = adapter
+        return adapter
+
     ctx.register_platform(
         name="meshcore", label="MeshCore",
-        adapter_factory=lambda cfg: MeshCoreAdapter(cfg),
+        adapter_factory=_factory_with_ref,
         check_fn=check_requirements, validate_config=validate_config,
         is_connected=is_connected, required_env=["MESHCORE_HOST"],
         install_hint="pip install meshcore", setup_fn=interactive_setup,
@@ -1440,4 +1673,24 @@ def register(ctx):
             "Plain text only. Admin nodes get full access; public users restricted. "
             "Never share credentials or sensitive data in public channels."
         ),
+    )
+
+    # Register admin tools
+    ctx.register_tool(
+        name="meshcore_admin",
+        toolset="meshcore",
+        schema=MESHCORE_ADMIN_SCHEMA,
+        handler=lambda args, **kw: _handle_meshcore_admin(
+            node=args.get("node", ""), command=args.get("command", "")),
+        is_async=True,
+        emoji="🛰️",
+    )
+    ctx.register_tool(
+        name="meshcore_contact",
+        toolset="meshcore",
+        schema=MESHCORE_CONTACT_SCHEMA,
+        handler=lambda args, **kw: _handle_meshcore_contact(
+            name=args.get("name", "")),
+        is_async=True,
+        emoji="📇",
     )
