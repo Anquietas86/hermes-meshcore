@@ -1386,10 +1386,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def query_remote_repeater(self, name: str, command: str,
                                      timeout: float = 30.0,
                                      password: str = "") -> Dict[str, Any]:
-        """Send a CLI command to a remote repeater via DM and collect responses.
-
-        Opens a SEPARATE TCP connection so it doesn't interfere with the
-        gateway's poll loop. The companion node accepts multiple connections.
+        """Send a CLI command to a remote repeater via DM using the gateway's
+        existing TCP connection. Blocks the poll loop briefly (15-30s) while
+        waiting for the response — acceptable for occasional admin queries.
 
         Guest password is blank by default — read-only commands (ver, stats-*,
         get *, neighbors, clock) work without auth. Write commands require
@@ -1398,6 +1397,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         Returns {"success": True, "responses": [...], "node": {...}} or
         {"success": False, "error": "..."}.
         """
+        if not self._conn or not self._conn.is_connected:
+            return {"success": False, "error": "Gateway not connected to node"}
+
         contact = await self._find_contact_by_name(name)
         if contact is None:
             return {"success": False, "error": f"Node not found: {name}"}
@@ -1406,115 +1408,70 @@ class MeshCoreAdapter(BasePlatformAdapter):
         pubkey_prefix = pubkey[:12]
         dst_bytes = bytes.fromhex(pubkey)[:6]
 
-        # Open a fresh connection for this query
-        try:
-            reader, writer = await asyncio.open_connection(self.host, self.port)
-        except Exception as e:
-            return {"success": False, "error": f"TCP connect failed: {e}"}
-
-        try:
-            # Initialize session — required for the node to route messages
-            init_cmd = b"\x01\x03   hermes"
-            init_frame = bytes([FRAME_SEND_MARKER]) + len(init_cmd).to_bytes(2, "little") + init_cmd
-            writer.write(init_frame)
-            await writer.drain()
-            # Read SELF_INFO response
+        # Send auth DM if password provided
+        if password:
+            ts = int(time.time())
+            auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                      ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
             try:
-                marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-                if marker[0] == FRAME_RECV_MARKER:
-                    size = int.from_bytes(
-                        await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                    payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-                    # Consume SELF_INFO
+                await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
             except Exception:
                 pass
 
-            # If password provided, authenticate first
-            if password:
-                ts = int(time.time())
-                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
-                auth_frame = bytes([FRAME_SEND_MARKER]) + len(auth_cmd).to_bytes(2, "little") + auth_cmd
-                writer.write(auth_frame)
-                await writer.drain()
-                # Brief poll to consume auth response
-                await asyncio.sleep(3.0)
-                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
-                writer.write(poll)
-                await writer.drain()
-                try:
-                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-                    if marker[0] == FRAME_RECV_MARKER:
-                        size = int.from_bytes(
-                            await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                        payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-                        # Consume auth response (OK or error)
-                except Exception:
-                    pass
+        # Send the command DM
+        ts = int(time.time())
+        cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+              ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
+        try:
+            pkt_type, _ = await self._conn.send_command(
+                cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+            if pkt_type != PKT_MSG_SENT:
+                return {"success": False, "error": "Node rejected send"}
+        except Exception as e:
+            return {"success": False, "error": f"Send failed: {e}"}
 
-            # Send the command as a DM
-            timestamp = int(time.time())
-            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-                  timestamp.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
-            frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
-            writer.write(frame)
-            await writer.drain()
-
-            # Poll for responses
-            responses = []
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                # Send poll command
-                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
-                writer.write(poll)
-                await writer.drain()
-
-                # Read response frame
-                try:
-                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-                except asyncio.TimeoutError:
-                    continue
-                if marker[0] != FRAME_RECV_MARKER:
-                    continue
-                size = int.from_bytes(
-                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-
-                pkt_type = payload[0]
-                pkt_data = payload[1:]
-
-                if pkt_type == PKT_NO_MORE_MSGS:
+        # Poll for DM responses from the target repeater.
+        # This blocks the poll loop (both use send_command → same lock),
+        # but 15-30s is acceptable for occasional admin queries.
+        responses = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                pkt_type, payload = await self._conn.send_command(
+                    b"\x0A",
+                    [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                     PKT_NO_MORE_MSGS, PKT_ERROR],
+                    timeout=5.0,
+                )
+                if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                    msg = MeshCoreRawConnection.parse_contact_msg(
+                        payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
+                    # Only collect responses from our target
+                    msg_pk = msg.get("pubkey_prefix", "")
+                    if msg_pk.lower() == pubkey_prefix.lower():
+                        text = msg.get("text", "")
+                        if text:
+                            responses.append(text)
+                elif pkt_type == PKT_NO_MORE_MSGS:
                     await asyncio.sleep(2.0)
                     continue
-                elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
-                    msg = MeshCoreRawConnection.parse_contact_msg(
-                        pkt_data, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
-                    text = msg.get("text", "")
-                    if text:
-                        responses.append(text)
                 elif pkt_type == PKT_ERROR:
                     break
-
-            return {
-                "success": True,
-                "responses": responses,
-                "node": {
-                    "name": contact.get("adv_name", ""),
-                    "pubkey_prefix": pubkey_prefix,
-                    "type": contact.get("type"),
-                    "lat": contact.get("adv_lat"),
-                    "lon": contact.get("adv_lon"),
-                    "last_advert": contact.get("last_advert"),
-                },
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-        finally:
-            writer.close()
-            try:
-                await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
             except Exception:
-                pass
+                await asyncio.sleep(2.0)
+
+        return {
+            "success": True,
+            "responses": responses,
+            "node": {
+                "name": contact.get("adv_name", ""),
+                "pubkey_prefix": pubkey_prefix,
+                "type": contact.get("type"),
+                "lat": contact.get("adv_lat"),
+                "lon": contact.get("adv_lon"),
+                "last_advert": contact.get("last_advert"),
+            },
+        }
 
     async def get_contact_details(self, name: str) -> Dict[str, Any]:
         """Get full details for a contact by name or pubkey prefix."""
@@ -1602,277 +1559,32 @@ ALL_READONLY_COMMANDS = [
 
 
 async def _handle_meshcore_admin(node: str, command: str, password: str = "") -> str:
-    """Handler for meshcore_admin tool. Uses adapter singleton if available,
-    otherwise opens a standalone TCP connection for the query.
-    If password is provided, sends 'password <pw>' before the command."""
+    """Handler for meshcore_admin tool. Requires the gateway adapter to be
+    connected — uses the gateway's existing TCP connection."""
     adapter = MeshCoreAdapter._instance
-    if adapter is not None:
-        if command == "all":
-            all_results = {}
-            for cmd in ALL_READONLY_COMMANDS:
-                result = await adapter.query_remote_repeater(node, cmd, timeout=15.0, password=password)
-                all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
-            return json.dumps({"success": True, "node": node, "results": all_results})
-        result = await adapter.query_remote_repeater(node, command, password=password)
-        return json.dumps(result)
+    if adapter is None:
+        return json.dumps({"success": False, "error": "MeshCore gateway not connected — admin tools require the gateway to be running"})
 
-    # Standalone: open fresh TCP connection, fetch contacts, send DM, poll
-    host = os.getenv("MESHCORE_HOST", "192.168.0.141")
-    port = int(os.getenv("MESHCORE_PORT", "5000"))
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-    except Exception as e:
-        return json.dumps({"success": False, "error": f"TCP connect failed: {e}"})
-
-    try:
-        # Initialize session — required for the node to route messages
-        init_cmd = b"\x01\x03   hermes"
-        init_frame = bytes([FRAME_SEND_MARKER]) + len(init_cmd).to_bytes(2, "little") + init_cmd
-        writer.write(init_frame)
-        await writer.drain()
-        # Read SELF_INFO response
-        try:
-            marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-            if marker[0] == FRAME_RECV_MARKER:
-                size = int.from_bytes(
-                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-                # Consume SELF_INFO
-        except Exception:
-            pass
-
-        # Fetch contacts to find the node
-        cmd = bytes([CMD_GET_CONTACTS])
-        frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
-        writer.write(frame)
-        await writer.drain()
-
-        contacts = {}
-        while True:
-            marker = await asyncio.wait_for(reader.readexactly(1), timeout=10.0)
-            if marker[0] != FRAME_RECV_MARKER:
-                continue
-            size = int.from_bytes(
-                await asyncio.wait_for(reader.readexactly(2), timeout=5.0), "little")
-            payload = await asyncio.wait_for(reader.readexactly(size), timeout=5.0)
-            pkt_type = payload[0]
-            pkt_data = payload[1:]
-            if pkt_type == PKT_CONTACT:
-                c = MeshCoreRawConnection.parse_contact(pkt_data)
-                contacts[c["public_key"]] = c
-            elif pkt_type == PKT_CONTACT_END:
-                break
-            elif pkt_type == PKT_ERROR:
-                break
-
-        # Fuzzy search
-        name_lower = node.lower()
-        contact = None
-        for c in contacts.values():
-            if c.get("adv_name", "").lower() == name_lower:
-                contact = c
-                break
-        if contact is None:
-            candidates = []
-            for c in contacts.values():
-                adv = c.get("adv_name", "").lower()
-                if name_lower in adv:
-                    candidates.append((len(adv) - len(name_lower), c))
-            if candidates:
-                candidates.sort(key=lambda x: x[0])
-                contact = candidates[0][1]
-        if contact is None:
-            for pk, c in contacts.items():
-                if pk.lower().startswith(name_lower):
-                    contact = c
-                    break
-
-        if contact is None:
-            return json.dumps({"success": False, "error": f"Node not found: {node}"})
-
-        pubkey = contact["public_key"]
-        dst_bytes = bytes.fromhex(pubkey)[:6]
-
-        commands = ALL_READONLY_COMMANDS if command == "all" else [command]
+    if command == "all":
         all_results = {}
-        for cmd_text in commands:
-            # If password provided, authenticate first
-            if password:
-                ts = int(time.time())
-                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
-                auth_frame = bytes([FRAME_SEND_MARKER]) + len(auth_cmd).to_bytes(2, "little") + auth_cmd
-                writer.write(auth_frame)
-                await writer.drain()
-                # Brief poll to consume auth response
-                await asyncio.sleep(3.0)
-                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
-                writer.write(poll)
-                await writer.drain()
-                try:
-                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-                    if marker[0] == FRAME_RECV_MARKER:
-                        size = int.from_bytes(
-                            await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                        payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-                        # Consume auth response (OK or error)
-                except Exception:
-                    pass
+        for cmd in ALL_READONLY_COMMANDS:
+            result = await adapter.query_remote_repeater(node, cmd, timeout=15.0, password=password)
+            all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
+        return json.dumps({"success": True, "node": node, "results": all_results})
 
-            # Send DM
-            ts = int(time.time())
-            dm_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-                     ts.to_bytes(4, "little") + dst_bytes + cmd_text.encode("utf-8")
-            dm_frame = bytes([FRAME_SEND_MARKER]) + len(dm_cmd).to_bytes(2, "little") + dm_cmd
-            writer.write(dm_frame)
-            await writer.drain()
-
-            # Poll for responses
-            responses = []
-            deadline = time.time() + 15.0
-            while time.time() < deadline:
-                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
-                writer.write(poll)
-                await writer.drain()
-                try:
-                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
-                except asyncio.TimeoutError:
-                    continue
-                if marker[0] != FRAME_RECV_MARKER:
-                    continue
-                size = int.from_bytes(
-                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
-                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
-                pkt_type = payload[0]
-                pkt_data = payload[1:]
-                if pkt_type == PKT_NO_MORE_MSGS:
-                    await asyncio.sleep(2.0)
-                    continue
-                elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
-                    msg = MeshCoreRawConnection.parse_contact_msg(
-                        pkt_data, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
-                    text = msg.get("text", "")
-                    if text:
-                        responses.append(text)
-                elif pkt_type == PKT_ERROR:
-                    break
-
-            all_results[cmd_text] = responses if responses else "no response"
-
-        return json.dumps({
-            "success": True,
-            "node": node,
-            "results": all_results,
-            "node_info": {
-                "name": contact.get("adv_name", ""),
-                "pubkey_prefix": pubkey[:12],
-                "type": contact.get("type"),
-                "lat": contact.get("adv_lat"),
-                "lon": contact.get("adv_lon"),
-            },
-        })
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
-    finally:
-        writer.close()
-        try:
-            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
-        except Exception:
-            pass
+    result = await adapter.query_remote_repeater(node, command, password=password)
+    return json.dumps(result)
 
 
 async def _handle_meshcore_contact(name: str) -> str:
-    """Handler for meshcore_contact tool. Uses adapter singleton if available,
-    otherwise opens a standalone TCP connection to fetch contacts directly."""
+    """Handler for meshcore_contact tool. Requires the gateway adapter to be
+    connected — reads from the gateway's contact cache."""
     adapter = MeshCoreAdapter._instance
-    if adapter is not None:
-        result = await adapter.get_contact_details(name)
-        return json.dumps(result)
+    if adapter is None:
+        return json.dumps({"success": False, "error": "MeshCore gateway not connected — contact lookup requires the gateway to be running"})
 
-    # Standalone: open fresh TCP connection, fetch contacts, look up
-    host = os.getenv("MESHCORE_HOST", "192.168.0.141")
-    port = int(os.getenv("MESHCORE_PORT", "5000"))
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-    except Exception as e:
-        return json.dumps({"success": False, "error": f"TCP connect failed: {e}"})
-
-    try:
-        # Fetch contacts
-        cmd = bytes([CMD_GET_CONTACTS])
-        frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
-        writer.write(frame)
-        await writer.drain()
-
-        contacts = {}
-        while True:
-            marker = await asyncio.wait_for(reader.readexactly(1), timeout=10.0)
-            if marker[0] != FRAME_RECV_MARKER:
-                continue
-            size = int.from_bytes(
-                await asyncio.wait_for(reader.readexactly(2), timeout=5.0), "little")
-            payload = await asyncio.wait_for(reader.readexactly(size), timeout=5.0)
-            pkt_type = payload[0]
-            pkt_data = payload[1:]
-            if pkt_type == PKT_CONTACT:
-                c = MeshCoreRawConnection.parse_contact(pkt_data)
-                contacts[c["public_key"]] = c
-            elif pkt_type == PKT_CONTACT_END:
-                break
-            elif pkt_type == PKT_ERROR:
-                break
-
-        # Fuzzy search
-        name_lower = name.lower()
-        contact = None
-        for c in contacts.values():
-            if c.get("adv_name", "").lower() == name_lower:
-                contact = c
-                break
-        if contact is None:
-            candidates = []
-            for c in contacts.values():
-                adv = c.get("adv_name", "").lower()
-                if name_lower in adv:
-                    candidates.append((len(adv) - len(name_lower), c))
-            if candidates:
-                candidates.sort(key=lambda x: x[0])
-                contact = candidates[0][1]
-        if contact is None:
-            for pk, c in contacts.items():
-                if pk.lower().startswith(name_lower):
-                    contact = c
-                    break
-
-        if contact is None:
-            return json.dumps({"success": False, "error": f"Node not found: {name}"})
-
-        type_names = {0: "unknown", 1: "client", 2: "repeater", 3: "room"}
-        ctype = contact.get("type")
-        return json.dumps({
-            "success": True,
-            "name": contact.get("adv_name", ""),
-            "pubkey": contact.get("public_key", ""),
-            "pubkey_prefix": contact.get("public_key", "")[:12],
-            "type": ctype,
-            "type_name": type_names.get(ctype, "unknown") if ctype is not None else "unknown",
-            "flags": contact.get("flags"),
-            "out_path_len": contact.get("out_path_len"),
-            "out_path_hash_mode": contact.get("out_path_hash_mode"),
-            "out_path": contact.get("out_path", ""),
-            "lat": contact.get("adv_lat"),
-            "lon": contact.get("adv_lon"),
-            "last_advert": contact.get("last_advert"),
-            "lastmod": contact.get("lastmod"),
-        })
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
-    finally:
-        writer.close()
-        try:
-            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
-        except Exception:
-            pass
+    result = await adapter.get_contact_details(name)
+    return json.dumps(result)
 
 
 # ── Plugin registration ───────────────────────────────────────────────────
