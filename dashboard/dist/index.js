@@ -474,6 +474,11 @@
     // Boolean toggle state
     var _g = useState({ allow_all_users: false, enable_dms: false }), boolToggles = _g[0], setBoolToggles = _g[1];
 
+    // Cleanup poll timer on unmount (must be before any early returns)
+    React.useEffect(function () {
+      return function () { if (queryPollTimer) clearInterval(queryPollTimer); };
+    }, []);
+
     useEffect(function () {
       api("/config")
         .then(function (d) {
@@ -680,11 +685,6 @@
           setQueryResult({ error: "Submit failed: " + String(e) });
         });
     }
-
-    // Cleanup poll timer on unmount
-    React.useEffect(function () {
-      return function () { if (queryPollTimer) clearInterval(queryPollTimer); };
-    }, []);
 
     var textFields = [
       { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
