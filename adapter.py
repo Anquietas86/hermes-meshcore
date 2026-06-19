@@ -1557,30 +1557,237 @@ ALL_READONLY_COMMANDS = [
 
 
 async def _handle_meshcore_admin(node: str, command: str) -> str:
-    """Handler for meshcore_admin tool."""
+    """Handler for meshcore_admin tool. Uses adapter singleton if available,
+    otherwise opens a standalone TCP connection for the query."""
     adapter = MeshCoreAdapter._instance
-    if adapter is None:
-        return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
+    if adapter is not None:
+        if command == "all":
+            all_results = {}
+            for cmd in ALL_READONLY_COMMANDS:
+                result = await adapter.query_remote_repeater(node, cmd, timeout=15.0)
+                all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
+            return json.dumps({"success": True, "node": node, "results": all_results})
+        result = await adapter.query_remote_repeater(node, command)
+        return json.dumps(result)
 
-    if command == "all":
+    # Standalone: open fresh TCP connection, fetch contacts, send DM, poll
+    host = os.getenv("MESHCORE_HOST", "192.168.0.141")
+    port = int(os.getenv("MESHCORE_PORT", "5000"))
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"TCP connect failed: {e}"})
+
+    try:
+        # Fetch contacts to find the node
+        cmd = bytes([CMD_GET_CONTACTS])
+        frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
+        writer.write(frame)
+        await writer.drain()
+
+        contacts = {}
+        while True:
+            marker = await asyncio.wait_for(reader.readexactly(1), timeout=10.0)
+            if marker[0] != FRAME_RECV_MARKER:
+                continue
+            size = int.from_bytes(
+                await asyncio.wait_for(reader.readexactly(2), timeout=5.0), "little")
+            payload = await asyncio.wait_for(reader.readexactly(size), timeout=5.0)
+            pkt_type = payload[0]
+            pkt_data = payload[1:]
+            if pkt_type == PKT_CONTACT:
+                c = MeshCoreRawConnection.parse_contact(pkt_data)
+                contacts[c["public_key"]] = c
+            elif pkt_type == PKT_CONTACT_END:
+                break
+            elif pkt_type == PKT_ERROR:
+                break
+
+        # Fuzzy search
+        name_lower = node.lower()
+        contact = None
+        for c in contacts.values():
+            if c.get("adv_name", "").lower() == name_lower:
+                contact = c
+                break
+        if contact is None:
+            candidates = []
+            for c in contacts.values():
+                adv = c.get("adv_name", "").lower()
+                if name_lower in adv:
+                    candidates.append((len(adv) - len(name_lower), c))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                contact = candidates[0][1]
+        if contact is None:
+            for pk, c in contacts.items():
+                if pk.lower().startswith(name_lower):
+                    contact = c
+                    break
+
+        if contact is None:
+            return json.dumps({"success": False, "error": f"Node not found: {node}"})
+
+        pubkey = contact["public_key"]
+        dst_bytes = bytes.fromhex(pubkey)[:6]
+
+        commands = ALL_READONLY_COMMANDS if command == "all" else [command]
         all_results = {}
-        for cmd in ALL_READONLY_COMMANDS:
-            result = await adapter.query_remote_repeater(node, cmd, timeout=15.0)
-            all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
-        return json.dumps({"success": True, "node": node, "results": all_results})
+        for cmd_text in commands:
+            # Send DM
+            ts = int(time.time())
+            dm_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                     ts.to_bytes(4, "little") + dst_bytes + cmd_text.encode("utf-8")
+            dm_frame = bytes([FRAME_SEND_MARKER]) + len(dm_cmd).to_bytes(2, "little") + dm_cmd
+            writer.write(dm_frame)
+            await writer.drain()
 
-    result = await adapter.query_remote_repeater(node, command)
-    return json.dumps(result)
+            # Poll for responses
+            responses = []
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
+                writer.write(poll)
+                await writer.drain()
+                try:
+                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                except asyncio.TimeoutError:
+                    continue
+                if marker[0] != FRAME_RECV_MARKER:
+                    continue
+                size = int.from_bytes(
+                    await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+                pkt_type = payload[0]
+                pkt_data = payload[1:]
+                if pkt_type == PKT_NO_MORE_MSGS:
+                    await asyncio.sleep(2.0)
+                    continue
+                elif pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                    msg = MeshCoreRawConnection.parse_contact_msg(
+                        pkt_data, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
+                    text = msg.get("text", "")
+                    if text:
+                        responses.append(text)
+                elif pkt_type == PKT_ERROR:
+                    break
+
+            all_results[cmd_text] = responses if responses else "no response"
+
+        return json.dumps({
+            "success": True,
+            "node": node,
+            "results": all_results,
+            "node_info": {
+                "name": contact.get("adv_name", ""),
+                "pubkey_prefix": pubkey[:12],
+                "type": contact.get("type"),
+                "lat": contact.get("adv_lat"),
+                "lon": contact.get("adv_lon"),
+            },
+        })
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+        except Exception:
+            pass
 
 
 async def _handle_meshcore_contact(name: str) -> str:
-    """Handler for meshcore_contact tool."""
+    """Handler for meshcore_contact tool. Uses adapter singleton if available,
+    otherwise opens a standalone TCP connection to fetch contacts directly."""
     adapter = MeshCoreAdapter._instance
-    if adapter is None:
-        return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
+    if adapter is not None:
+        result = await adapter.get_contact_details(name)
+        return json.dumps(result)
 
-    result = await adapter.get_contact_details(name)
-    return json.dumps(result)
+    # Standalone: open fresh TCP connection, fetch contacts, look up
+    host = os.getenv("MESHCORE_HOST", "192.168.0.141")
+    port = int(os.getenv("MESHCORE_PORT", "5000"))
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"TCP connect failed: {e}"})
+
+    try:
+        # Fetch contacts
+        cmd = bytes([CMD_GET_CONTACTS])
+        frame = bytes([FRAME_SEND_MARKER]) + len(cmd).to_bytes(2, "little") + cmd
+        writer.write(frame)
+        await writer.drain()
+
+        contacts = {}
+        while True:
+            marker = await asyncio.wait_for(reader.readexactly(1), timeout=10.0)
+            if marker[0] != FRAME_RECV_MARKER:
+                continue
+            size = int.from_bytes(
+                await asyncio.wait_for(reader.readexactly(2), timeout=5.0), "little")
+            payload = await asyncio.wait_for(reader.readexactly(size), timeout=5.0)
+            pkt_type = payload[0]
+            pkt_data = payload[1:]
+            if pkt_type == PKT_CONTACT:
+                c = MeshCoreRawConnection.parse_contact(pkt_data)
+                contacts[c["public_key"]] = c
+            elif pkt_type == PKT_CONTACT_END:
+                break
+            elif pkt_type == PKT_ERROR:
+                break
+
+        # Fuzzy search
+        name_lower = name.lower()
+        contact = None
+        for c in contacts.values():
+            if c.get("adv_name", "").lower() == name_lower:
+                contact = c
+                break
+        if contact is None:
+            candidates = []
+            for c in contacts.values():
+                adv = c.get("adv_name", "").lower()
+                if name_lower in adv:
+                    candidates.append((len(adv) - len(name_lower), c))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                contact = candidates[0][1]
+        if contact is None:
+            for pk, c in contacts.items():
+                if pk.lower().startswith(name_lower):
+                    contact = c
+                    break
+
+        if contact is None:
+            return json.dumps({"success": False, "error": f"Node not found: {name}"})
+
+        type_names = {0: "unknown", 1: "client", 2: "repeater", 3: "room"}
+        ctype = contact.get("type")
+        return json.dumps({
+            "success": True,
+            "name": contact.get("adv_name", ""),
+            "pubkey": contact.get("public_key", ""),
+            "pubkey_prefix": contact.get("public_key", "")[:12],
+            "type": ctype,
+            "type_name": type_names.get(ctype, "unknown") if ctype is not None else "unknown",
+            "flags": contact.get("flags"),
+            "out_path_len": contact.get("out_path_len"),
+            "out_path_hash_mode": contact.get("out_path_hash_mode"),
+            "out_path": contact.get("out_path", ""),
+            "lat": contact.get("adv_lat"),
+            "lon": contact.get("adv_lon"),
+            "last_advert": contact.get("last_advert"),
+            "lastmod": contact.get("lastmod"),
+        })
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+        except Exception:
+            pass
 
 
 # ── Plugin registration ───────────────────────────────────────────────────
