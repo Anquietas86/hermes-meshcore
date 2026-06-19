@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -218,8 +218,13 @@ async def get_config():
 
 
 @router.post("/config")
-async def update_config(body: dict):
+async def update_config(request: Request):
     """Update meshcore platform configuration. Accepts any subset of config keys."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     updates = {k: v for k, v in body.items() if k in CONFIG_KEYS}
     if not updates:
         raise HTTPException(status_code=400, detail="No valid config keys provided")
@@ -241,9 +246,14 @@ ADMIN_RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
 
 
 @router.post("/admin/query")
-async def submit_admin_query(body: dict):
+async def submit_admin_query(request: Request):
     """Submit an admin query for a remote repeater. The gateway's keepalive
     loop picks it up within 15s and writes the response file."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     node = body.get("node", "").strip()
     command = body.get("command", "").strip()
     password = body.get("password", "")
@@ -256,7 +266,7 @@ async def submit_admin_query(body: dict):
         raise HTTPException(status_code=409, detail="An admin query is already in progress")
 
     request_id = str(int(time.time()))
-    request = {
+    req_data = {
         "request_id": request_id,
         "node": node,
         "command": command,
@@ -264,7 +274,7 @@ async def submit_admin_query(body: dict):
         "submitted_at": time.time(),
     }
     with open(ADMIN_REQUEST_FILE, "w") as f:
-        json.dump(request, f)
+        json.dump(req_data, f)
 
     return JSONResponse({"success": True, "request_id": request_id, "message": "Query submitted — gateway will process within 15s"})
 
