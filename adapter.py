@@ -1630,22 +1630,32 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 # Poll for responses. The capture mechanism in _route_dm
                 # collects matching DMs into _admin_query_responses as they
                 # arrive during send_command's unsolicited handling.
+                # But responses can also arrive as the DIRECT poll response
+                # (bypassing _route_dm) — we must handle both paths.
                 deadline = time.time() + timeout
                 while time.time() < deadline:
                     try:
-                        pkt_type, _ = await self._conn.send_command(
+                        pkt_type, payload = await self._conn.send_command(
                             b"\x0A",
                             [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
                              PKT_NO_MORE_MSGS, PKT_ERROR],
                             timeout=5.0,
                         )
-                        if pkt_type == PKT_NO_MORE_MSGS:
+                        if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                            # Direct poll response — bypassed _route_dm, parse manually
+                            msg = MeshCoreRawConnection.parse_contact_msg(
+                                payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
+                            msg_pk = msg.get("pubkey_prefix", "")
+                            if msg_pk.lower() == pubkey_prefix.lower():
+                                text = msg.get("text", "")
+                                if text:
+                                    self._admin_query_responses.append(text)
+                            continue
+                        elif pkt_type == PKT_NO_MORE_MSGS:
                             await asyncio.sleep(2.0)
                             continue
                         elif pkt_type == PKT_ERROR:
                             break
-                        # If we got a DM response directly (not captured),
-                        # it's already in _admin_query_responses via _route_dm
                     except Exception:
                         await asyncio.sleep(2.0)
 
