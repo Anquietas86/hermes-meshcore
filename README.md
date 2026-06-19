@@ -17,10 +17,14 @@ standard library only.
 - **Admin channels** — mark trusted channels for sensitive replies
 - **Radio metadata** — RSSI, SNR, hops, and path info injected into channel context
 - **Self-healing** — silence watchdog with automatic reconnect, stale frame drain
-- **Remote repeater admin** — query remote repeaters via CLI commands over the mesh (`meshcore_admin` tool)
+- **Remote repeater admin** — query remote repeaters via binary protocol commands over the mesh (`meshcore_admin_query` tool)
+- **Binary protocol** — uses `CMD_BINARY_REQ` (0x32) and `CMD_SEND_ANON_REQ` (0x33) with dedicated sub-opcodes for status, telemetry, neighbours, ACL, owner info, and more
+- **Neighbours parsing** — decoded neighbour lists with SNR and last-seen times
+- **Status parsing** — uptime, battery voltage, noise floor, RSSI, SNR, packet counts, errors, airtime
+- **Proper login** — `CMD_SEND_LOGIN` (0x1a) with full 32-byte public key + password; always attempts login even with guest/empty password
+- **90s poll timeout** — matches app behaviour for slow repeaters
 - **Contact lookup** — instant node details from the contact cache (`meshcore_contact` tool)
-- **Password auth** — admin password support for repeaters that require authentication
-- **Live dashboard** — real-time node telemetry, contacts, channels, and configuration management via the Hermes web dashboard
+- **Live dashboard** — real-time node telemetry, contacts, channels, configuration management, and remote repeater admin via the Hermes web dashboard
 
 ## Dashboard
 
@@ -28,6 +32,11 @@ The plugin includes a live dashboard tab at `/meshcore` showing:
 
 - **📡 Connection & Contacts** — gateway status, host, last message, DMs, contact counts (repeaters/clients/rooms), channel list with names
 - **🖥️ Node & Telemetry** — node name, pubkey, location, radio params (frequency/bandwidth/SF/CR), battery voltage, uptime, TX/RX packets, signal (noise/RSSI/SNR)
+- **🔧 Remote Repeater Admin** — query any repeater on the mesh:
+  - **Node dropdown** — populated from live known nodes (repeaters only)
+  - **Command dropdown** — 17 read-only binary queries: `stats-core`, `stats-radio`, `stats-packets`, `ver`, `board`, `clock`, `neighbors`, `advert`, `get name`, `get radio`, `get tx`, `get repeat`, `get public.key`, `get advert.interval`, `get owner.info`, `get bridge.type`, `req_acl`, `region list allowed`, `region list denied`, `gps`
+  - **Password field** — for repeaters requiring authentication (guest/empty works for read-only)
+  - **Parsed response** — human-readable output (neighbour lists with SNR, status with uptime/battery/radio stats)
 - **⚙️ Configuration** — edit all gateway settings inline:
   - **Channel checkbox matrix** — toggle Monitor/Admin/Mention per channel
   - **Access toggles** — Allow All Users, Enable DMs (checkboxes)
