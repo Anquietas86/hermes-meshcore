@@ -1590,6 +1590,106 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return c
         return None
 
+    @staticmethod
+    def _parse_status_response(payload: bytes, pubkey_prefix: str) -> str:
+        """Parse a STATUS_RESPONSE (0x87) push frame into human-readable text.
+
+        Format: 8-byte header (tag + timestamp) + status fields.
+        Uses the same field layout as meshcore_py's parse_status() with offset=8.
+        """
+        if len(payload) < 60:
+            return f"[STATUS] (too short: {len(payload)} bytes) {payload.hex()}"
+        # Fields start at offset 8 (skip 4-byte tag + 4-byte timestamp)
+        d = payload
+        bat = int.from_bytes(d[8:10], "little")
+        tx_queue = int.from_bytes(d[10:12], "little")
+        noise = int.from_bytes(d[12:14], "little", signed=True)
+        rssi = int.from_bytes(d[14:16], "little", signed=True)
+        nb_recv = int.from_bytes(d[16:20], "little")
+        nb_sent = int.from_bytes(d[20:24], "little")
+        airtime = int.from_bytes(d[24:28], "little")
+        uptime = int.from_bytes(d[28:32], "little")
+        sent_flood = int.from_bytes(d[32:36], "little")
+        sent_direct = int.from_bytes(d[36:40], "little")
+        recv_flood = int.from_bytes(d[40:44], "little")
+        recv_direct = int.from_bytes(d[44:48], "little")
+        full_evts = int.from_bytes(d[48:50], "little")
+        snr = int.from_bytes(d[50:52], "little", signed=True) / 4.0
+        direct_dups = int.from_bytes(d[52:54], "little")
+        flood_dups = int.from_bytes(d[54:56], "little")
+        rx_airtime = int.from_bytes(d[56:60], "little")
+        recv_errors = int.from_bytes(d[60:64], "little") if len(d) >= 64 else None
+
+        days = uptime // 86400
+        hours = (uptime % 86400) // 3600
+        mins = (uptime % 3600) // 60
+        return (
+            f"=== {pubkey_prefix} Status ===\n"
+            f"Uptime: {days}d {hours}h {mins}m\n"
+            f"Battery: {bat}mV ({bat/1000:.2f}V)\n"
+            f"TX Queue: {tx_queue}  |  Full Events: {full_evts}\n"
+            f"Noise Floor: {noise}dBm  |  Last RSSI: {rssi}dBm  |  SNR: {snr:.1f}dB\n"
+            f"Packets: {nb_recv:,} recv / {nb_sent:,} sent\n"
+            f"  Flood: {sent_flood:,} sent / {recv_flood:,} recv\n"
+            f"  Direct: {sent_direct:,} sent / {recv_direct:,} recv\n"
+            f"  Dups: {direct_dups:,} direct / {flood_dups:,} flood\n"
+            f"TX Airtime: {airtime}ms  |  RX Airtime: {rx_airtime}ms\n"
+            + (f"Recv Errors: {recv_errors:,}\n" if recv_errors is not None else "")
+        )
+
+    @staticmethod
+    def _parse_binary_response(payload: bytes, pubkey_prefix: str) -> str:
+        """Parse a BINARY_RESPONSE (0x8C) into human-readable text.
+
+        Format: 1 byte skipped + 4-byte tag + response_data.
+        For STATUS requests, response_data uses parse_status() with offset=0.
+        """
+        if len(payload) < 5:
+            return f"[BINARY] (too short: {len(payload)} bytes) {payload.hex()}"
+        tag = payload[1:5].hex()
+        response_data = payload[5:]
+
+        # Try parsing as status (most common binary response type)
+        if len(response_data) >= 52:
+            d = response_data
+            bat = int.from_bytes(d[0:2], "little")
+            tx_queue = int.from_bytes(d[2:4], "little")
+            noise = int.from_bytes(d[4:6], "little", signed=True)
+            rssi = int.from_bytes(d[6:8], "little", signed=True)
+            nb_recv = int.from_bytes(d[8:12], "little")
+            nb_sent = int.from_bytes(d[12:16], "little")
+            airtime = int.from_bytes(d[16:20], "little")
+            uptime = int.from_bytes(d[20:24], "little")
+            sent_flood = int.from_bytes(d[24:28], "little")
+            sent_direct = int.from_bytes(d[28:32], "little")
+            recv_flood = int.from_bytes(d[32:36], "little")
+            recv_direct = int.from_bytes(d[36:40], "little")
+            full_evts = int.from_bytes(d[40:42], "little")
+            snr = int.from_bytes(d[42:44], "little", signed=True) / 4.0
+            direct_dups = int.from_bytes(d[44:46], "little")
+            flood_dups = int.from_bytes(d[46:48], "little")
+            rx_airtime = int.from_bytes(d[48:52], "little")
+            recv_errors = int.from_bytes(d[52:56], "little") if len(d) >= 56 else None
+
+            days = uptime // 86400
+            hours = (uptime % 86400) // 3600
+            mins = (uptime % 3600) // 60
+            return (
+                f"=== {pubkey_prefix} Status ===\n"
+                f"Uptime: {days}d {hours}h {mins}m\n"
+                f"Battery: {bat}mV ({bat/1000:.2f}V)\n"
+                f"TX Queue: {tx_queue}  |  Full Events: {full_evts}\n"
+                f"Noise Floor: {noise}dBm  |  Last RSSI: {rssi}dBm  |  SNR: {snr:.1f}dB\n"
+                f"Packets: {nb_recv:,} recv / {nb_sent:,} sent\n"
+                f"  Flood: {sent_flood:,} sent / {recv_flood:,} recv\n"
+                f"  Direct: {sent_direct:,} sent / {recv_direct:,} recv\n"
+                f"  Dups: {direct_dups:,} direct / {flood_dups:,} flood\n"
+                f"TX Airtime: {airtime}ms  |  RX Airtime: {rx_airtime}ms\n"
+                + (f"Recv Errors: {recv_errors:,}\n" if recv_errors is not None else "")
+            )
+        # Fallback: raw hex
+        return f"[BINARY tag={tag}] {response_data.hex()}"
+
     async def query_remote_repeater(self, name: str, command: str,
                                      timeout: float = 30.0,
                                      password: str = "") -> Dict[str, Any]:
@@ -1756,13 +1856,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
                         if pkt_type == PKT_STATUS_RESPONSE:
                             # Status response: parse and format
                             logger.info("MeshCore: admin poll STATUS_RESPONSE len=%d", len(payload) if payload else 0)
-                            self._admin_query_responses.append(
-                                f"[STATUS] {payload.hex() if payload else 'empty'}")
+                            parsed = self._parse_status_response(payload, pubkey_prefix)
+                            self._admin_query_responses.append(parsed)
                             continue
                         elif pkt_type == PKT_BINARY_RESPONSE:
                             logger.info("MeshCore: admin poll BINARY_RESPONSE len=%d", len(payload) if payload else 0)
-                            self._admin_query_responses.append(
-                                f"[BINARY] {payload.hex() if payload else 'empty'}")
+                            parsed = self._parse_binary_response(payload, pubkey_prefix)
+                            self._admin_query_responses.append(parsed)
                             continue
                         elif pkt_type == PKT_TELEMETRY_RESPONSE:
                             logger.info("MeshCore: admin poll TELEMETRY_RESPONSE len=%d", len(payload) if payload else 0)
