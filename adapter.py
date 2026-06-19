@@ -503,6 +503,9 @@ class MeshCoreRawConnection:
 class MeshCoreAdapter(BasePlatformAdapter):
     """MeshCore adapter using raw binary protocol — no meshcore_py."""
 
+    # Singleton ref for tool handlers (set in connect(), cleared in disconnect())
+    _instance: Optional["MeshCoreAdapter"] = None
+
     def __init__(self, config, **kwargs):
         platform = Platform("meshcore")
         super().__init__(config=config, platform=platform)
@@ -638,9 +641,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             pass
 
         self._mark_connected()
-        # Set module-level adapter ref for tool handlers
-        import sys
-        sys.modules[__name__]._adapter_ref = self
+        # Set class-level singleton for tool handlers
+        MeshCoreAdapter._instance = self
         logger.info("MeshCore: connected (raw protocol), channels=%s, DMs=%s",
                     sorted(self.monitor_channels) if self.monitor_channels else "(discovery)",
                     "on" if self.enable_dms else "off")
@@ -656,6 +658,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._stop_keepalive()
         self._stop_poll()
         self._mark_disconnected()
+        MeshCoreAdapter._instance = None
         if self._conn:
             try:
                 await self._conn.disconnect()
@@ -1499,9 +1502,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         }
 
 
-# ── Tool handlers (module-level, adapter ref set during register) ──────────
-
-_adapter_ref: Optional["MeshCoreAdapter"] = None
+# ── Tool handlers (module-level, adapter ref set during connect) ──────────
 
 MESHCORE_ADMIN_SCHEMA = {
     "name": "meshcore_admin",
@@ -1557,26 +1558,28 @@ ALL_READONLY_COMMANDS = [
 
 async def _handle_meshcore_admin(node: str, command: str) -> str:
     """Handler for meshcore_admin tool."""
-    if _adapter_ref is None:
+    adapter = MeshCoreAdapter._instance
+    if adapter is None:
         return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
 
     if command == "all":
         all_results = {}
         for cmd in ALL_READONLY_COMMANDS:
-            result = await _adapter_ref.query_remote_repeater(node, cmd, timeout=15.0)
+            result = await adapter.query_remote_repeater(node, cmd, timeout=15.0)
             all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
         return json.dumps({"success": True, "node": node, "results": all_results})
 
-    result = await _adapter_ref.query_remote_repeater(node, command)
+    result = await adapter.query_remote_repeater(node, command)
     return json.dumps(result)
 
 
 async def _handle_meshcore_contact(name: str) -> str:
     """Handler for meshcore_contact tool."""
-    if _adapter_ref is None:
+    adapter = MeshCoreAdapter._instance
+    if adapter is None:
         return json.dumps({"success": False, "error": "MeshCore adapter not connected"})
 
-    result = await _adapter_ref.get_contact_details(name)
+    result = await adapter.get_contact_details(name)
     return json.dumps(result)
 
 
@@ -1651,18 +1654,9 @@ def interactive_setup():
     print_success("Saved to ~/.hermes/.env")
 
 def register(ctx):
-    # Wrap adapter factory to capture the instance for tool handlers
-    _orig_factory = lambda cfg: MeshCoreAdapter(cfg)
-
-    def _factory_with_ref(cfg):
-        global _adapter_ref
-        adapter = _orig_factory(cfg)
-        _adapter_ref = adapter
-        return adapter
-
     ctx.register_platform(
         name="meshcore", label="MeshCore",
-        adapter_factory=_factory_with_ref,
+        adapter_factory=lambda cfg: MeshCoreAdapter(cfg),
         check_fn=check_requirements, validate_config=validate_config,
         is_connected=is_connected, required_env=["MESHCORE_HOST"],
         install_hint="pip install meshcore", setup_fn=interactive_setup,
