@@ -1663,6 +1663,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
         tag = payload[1:5].hex()
         response_data = payload[5:]
 
+        # Try parsing as neighbours (short response, 4+ bytes)
+        if 4 <= len(response_data) < 52:
+            try:
+                return MeshCoreAdapter._parse_neighbours_response(
+                    response_data, pubkey_prefix)
+            except Exception:
+                pass  # Fall through to raw hex
         # Try parsing as status (most common binary response type)
         if len(response_data) >= 52:
             d = response_data
@@ -1703,6 +1710,28 @@ class MeshCoreAdapter(BasePlatformAdapter):
             )
         # Fallback: raw hex
         return f"[BINARY tag={tag}] {response_data.hex()}"
+
+    @staticmethod
+    def _parse_neighbours_response(response_data: bytes, pubkey_prefix: str,
+                                    pubkey_prefix_length: int = 4) -> str:
+        """Parse a NEIGHBOURS binary response into human-readable text.
+
+        Format: 2B neighbours_count, 2B results_count, then per entry:
+          pk_plen bytes pubkey prefix, 4B secs_ago, 1B snr/4
+        """
+        import io
+        bbuf = io.BytesIO(response_data)
+        total = int.from_bytes(bbuf.read(2), "little", signed=True)
+        count = int.from_bytes(bbuf.read(2), "little", signed=True)
+        lines = [f"=== {pubkey_prefix} Neighbours ===",
+                 f"Total: {total}  |  In response: {count}"]
+        for i in range(count):
+            pk = bbuf.read(pubkey_prefix_length).hex()
+            secs = int.from_bytes(bbuf.read(4), "little", signed=True)
+            snr = int.from_bytes(bbuf.read(1), "little", signed=True) / 4.0
+            mins = secs // 60
+            lines.append(f"  {i+1}. {pk}  {secs}s ago ({mins}m)  SNR: {snr:.1f}dB")
+        return "\n".join(lines)
 
     async def query_remote_repeater(self, name: str, command: str,
                                      timeout: float = 60.0,
