@@ -561,6 +561,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._watchdog_task: Optional[asyncio.Task] = None
         self._stats_refresh_task: Optional[asyncio.Task] = None
         self._stats_cache: Dict[str, Any] = {}
+        self._admin_query_lock: asyncio.Lock = asyncio.Lock()  # prevents poll/keepalive during admin queries
         # Deduplication: prevent double-delivery when a message arrives as
         # unsolicited during a poll command's wait and then again as the
         # poll response. Keys: "dm:{pubkey}:{ts}" / "ch:{idx}:{sender}:{ts}"
@@ -758,6 +759,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def _poll_loop(self):
         """Poll for messages every 2 seconds using CMD_SYNC_NEXT_MESSAGE."""
         while self._conn and self._conn.is_connected:
+            # Skip polling during admin queries — they hold the cmd lock
+            if self._admin_query_lock.locked():
+                await asyncio.sleep(2.0)
+                continue
             try:
                 pkt_type, payload = await self._conn.send_command(
                     b"\x0A",
@@ -801,6 +806,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             await asyncio.sleep(15)
             if not self._conn or not self._conn.is_connected:
                 return
+            # Skip keepalive during admin queries — they hold the cmd lock
+            if self._admin_query_lock.locked():
+                continue
             try:
                 await self._conn.send_command(b"\x14", [PKT_BATTERY, PKT_ERROR], timeout=5.0)
                 failures = 0
@@ -1414,78 +1422,80 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._conn or not self._conn.is_connected:
             return {"success": False, "error": "Gateway not connected to node"}
 
-        contact = await self._find_contact_by_name(name)
-        if contact is None:
-            return {"success": False, "error": f"Node not found: {name}"}
+        # Hold admin_query_lock so poll/keepalive skip during the query
+        async with self._admin_query_lock:
+            contact = await self._find_contact_by_name(name)
+            if contact is None:
+                return {"success": False, "error": f"Node not found: {name}"}
 
-        pubkey = contact["public_key"]
-        pubkey_prefix = pubkey[:12]
-        dst_bytes = bytes.fromhex(pubkey)[:6]
+            pubkey = contact["public_key"]
+            pubkey_prefix = pubkey[:12]
+            dst_bytes = bytes.fromhex(pubkey)[:6]
 
-        # Send auth DM if password provided
-        if password:
+            # Send auth DM if password provided
+            if password:
+                ts = int(time.time())
+                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+                try:
+                    await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                except Exception:
+                    pass
+
+            # Send the command DM
             ts = int(time.time())
-            auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-                      ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+            cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                  ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
             try:
-                await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-            except Exception:
-                pass
+                pkt_type, _ = await self._conn.send_command(
+                    cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                if pkt_type != PKT_MSG_SENT:
+                    return {"success": False, "error": "Node rejected send"}
+            except Exception as e:
+                return {"success": False, "error": f"Send failed: {e}"}
 
-        # Send the command DM
-        ts = int(time.time())
-        cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
-              ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
-        try:
-            pkt_type, _ = await self._conn.send_command(
-                cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-            if pkt_type != PKT_MSG_SENT:
-                return {"success": False, "error": "Node rejected send"}
-        except Exception as e:
-            return {"success": False, "error": f"Send failed: {e}"}
-
-        # Poll for DM responses from the target repeater.
-        # This blocks the poll loop (both use send_command → same lock),
-        # but 15-30s is acceptable for occasional admin queries.
-        responses = []
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                pkt_type, payload = await self._conn.send_command(
-                    b"\x0A",
-                    [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
-                     PKT_NO_MORE_MSGS, PKT_ERROR],
-                    timeout=5.0,
-                )
-                if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
-                    msg = MeshCoreRawConnection.parse_contact_msg(
-                        payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
-                    # Only collect responses from our target
-                    msg_pk = msg.get("pubkey_prefix", "")
-                    if msg_pk.lower() == pubkey_prefix.lower():
-                        text = msg.get("text", "")
-                        if text:
-                            responses.append(text)
-                elif pkt_type == PKT_NO_MORE_MSGS:
+            # Poll for DM responses from the target repeater.
+            # This blocks the poll loop (both use send_command → same lock),
+            # but 15-30s is acceptable for occasional admin queries.
+            responses = []
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    pkt_type, payload = await self._conn.send_command(
+                        b"\x0A",
+                        [PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3,
+                         PKT_NO_MORE_MSGS, PKT_ERROR],
+                        timeout=5.0,
+                    )
+                    if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
+                        msg = MeshCoreRawConnection.parse_contact_msg(
+                            payload, is_v3=(pkt_type == PKT_CONTACT_MSG_RECV_V3))
+                        # Only collect responses from our target
+                        msg_pk = msg.get("pubkey_prefix", "")
+                        if msg_pk.lower() == pubkey_prefix.lower():
+                            text = msg.get("text", "")
+                            if text:
+                                responses.append(text)
+                    elif pkt_type == PKT_NO_MORE_MSGS:
+                        await asyncio.sleep(2.0)
+                        continue
+                    elif pkt_type == PKT_ERROR:
+                        break
+                except Exception:
                     await asyncio.sleep(2.0)
-                    continue
-                elif pkt_type == PKT_ERROR:
-                    break
-            except Exception:
-                await asyncio.sleep(2.0)
 
-        return {
-            "success": True,
-            "responses": responses,
-            "node": {
-                "name": contact.get("adv_name", ""),
-                "pubkey_prefix": pubkey_prefix,
-                "type": contact.get("type"),
-                "lat": contact.get("adv_lat"),
-                "lon": contact.get("adv_lon"),
-                "last_advert": contact.get("last_advert"),
-            },
-        }
+            return {
+                "success": True,
+                "responses": responses,
+                "node": {
+                    "name": contact.get("adv_name", ""),
+                    "pubkey_prefix": pubkey_prefix,
+                    "type": contact.get("type"),
+                    "lat": contact.get("adv_lat"),
+                    "lon": contact.get("adv_lon"),
+                    "last_advert": contact.get("last_advert"),
+                },
+            }
 
     async def get_contact_details(self, name: str) -> Dict[str, Any]:
         """Get full details for a contact by name or pubkey prefix."""
