@@ -46,6 +46,18 @@
     return Math.round(seconds / 3600) + "h ago";
   }
 
+  function formatTime(ts) {
+    if (!ts) return "—";
+    var d = new Date(ts * 1000);
+    var pad = function (n) { return n < 10 ? "0" + n : String(n); };
+    return d.getFullYear() + "-" +
+      pad(d.getMonth() + 1) + "-" +
+      pad(d.getDate()) + " " +
+      pad(d.getHours()) + ":" +
+      pad(d.getMinutes()) + ":" +
+      pad(d.getSeconds());
+  }
+
   function uptimeStr(s) {
     if (s == null) return "—";
     const h = Math.floor(s / 3600);
@@ -210,7 +222,7 @@
           React.createElement("div", { className: "mc-conn-badge", style: { background: connColor + "20", color: connColor } }, connLabel),
           React.createElement(StatRow, { label: "Host", value: escapeHtml(data.host) + ":" + (data.port || "—"), mono: true }),
           data.channels && data.channels.length > 0 && React.createElement(StatRow, { label: "Channels", value: data.channels.join(", "), mono: true }),
-          React.createElement(StatRow, { label: "Last Message", value: agoStr(data.last_message_ago_s) }),
+          React.createElement(StatRow, { label: "Last Message", value: formatTime(data.last_message_time), mono: true }),
           React.createElement(StatRow, { label: "DMs", value: data.dms_enabled ? "✅ Enabled" : "❌ Disabled" })
         )
       ),

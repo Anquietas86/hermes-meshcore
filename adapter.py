@@ -842,6 +842,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 "channels": sorted(self._discovered_channels) if self._discovered_channels else [],
                 "channel_names": {str(idx): name for idx, name in self._channel_names.items()},
                 "last_message_ago_s": round(time.time() - self._last_message_time, 1) if self._last_message_time else None,
+                "last_message_time": self._last_message_time if self._last_message_time else None,
                 "dms_enabled": self.enable_dms,
                 "admin": {
                     "nodes": sorted(self.admin_nodes) if self.admin_nodes else [],
