@@ -51,8 +51,20 @@ def _read_state() -> dict:
 
 
 def _read_config() -> dict:
-    """Read meshcore platform extra config from config.yaml."""
+    """Read meshcore platform config — .env first (what gateway uses), then config.yaml extra."""
     try:
+        # Read .env vars (what the gateway actually uses)
+        env_path = os.path.expanduser("~/.hermes/profiles/meshcore/.env")
+        env_vars = {}
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, val = line.partition("=")
+                        env_vars[key.strip()] = val.strip().strip('"').strip("'")
+
+        # Read config.yaml extra (fallback)
         with open(CONFIG_PATH) as f:
             cfg = yaml.safe_load(f) or {}
         extra = (
@@ -60,35 +72,72 @@ def _read_config() -> dict:
             .get("meshcore", {})
             .get("extra", {})
         )
+
+        # .env takes priority (matches gateway behaviour)
         return {
-            "admin_nodes": extra.get("admin_nodes", ""),
-            "admin_channels": extra.get("admin_channels", ""),
-            "monitor_channels": extra.get("monitor_channels", ""),
-            "require_mention_channels": extra.get("require_mention_channels", ""),
-            "allow_all_users": extra.get("allow_all_users", "true"),
-            "allowed_users": extra.get("allowed_users", ""),
-            "enable_dms": extra.get("enable_dms", "true"),
+            "admin_nodes": env_vars.get("MESHCORE_ADMIN_NODES", extra.get("admin_nodes", "")),
+            "admin_channels": env_vars.get("MESHCORE_ADMIN_CHANNELS", extra.get("admin_channels", "")),
+            "monitor_channels": env_vars.get("MESHCORE_MONITOR_CHANNELS", extra.get("monitor_channels", "")),
+            "require_mention_channels": env_vars.get("MESHCORE_REQUIRE_MENTION", extra.get("require_mention_channels", "")),
+            "allow_all_users": env_vars.get("MESHCORE_ALLOW_ALL_USERS", extra.get("allow_all_users", "true")),
+            "allowed_users": env_vars.get("MESHCORE_ALLOWED_USERS", extra.get("allowed_users", "")),
+            "enable_dms": env_vars.get("MESHCORE_ENABLE_DMS", extra.get("enable_dms", "true")),
         }
     except Exception as e:
         return {"error": str(e)}
 
 
+# Map config keys to .env variable names
+CONFIG_TO_ENV = {
+    "admin_nodes": "MESHCORE_ADMIN_NODES",
+    "admin_channels": "MESHCORE_ADMIN_CHANNELS",
+    "monitor_channels": "MESHCORE_MONITOR_CHANNELS",
+    "require_mention_channels": "MESHCORE_REQUIRE_MENTION",
+    "allow_all_users": "MESHCORE_ALLOW_ALL_USERS",
+    "allowed_users": "MESHCORE_ALLOWED_USERS",
+    "enable_dms": "MESHCORE_ENABLE_DMS",
+}
+
+
 def _write_config(updates: dict) -> dict:
-    """Write meshcore platform extra config to config.yaml. Returns updated values."""
+    """Write meshcore platform config to both .env (what gateway reads) and config.yaml extra."""
     try:
+        # Write to config.yaml extra
         with open(CONFIG_PATH) as f:
             cfg = yaml.safe_load(f) or {}
-
-        # Ensure nested structure exists
         cfg.setdefault("platforms", {}).setdefault("meshcore", {}).setdefault("extra", {})
-
         extra = cfg["platforms"]["meshcore"]["extra"]
         for key in CONFIG_KEYS:
             if key in updates:
                 extra[key] = str(updates[key])
-
         with open(CONFIG_PATH, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        # Write to .env (what the gateway actually reads)
+        env_path = os.path.expanduser("~/.hermes/profiles/meshcore/.env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                env_lines = f.readlines()
+            new_lines = []
+            updated_keys = set()
+            for line in env_lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    key, _, _ = stripped.partition("=")
+                    key = key.strip()
+                    if key in CONFIG_TO_ENV.values():
+                        config_key = [k for k, v in CONFIG_TO_ENV.items() if v == key][0]
+                        if config_key in updates:
+                            new_lines.append(f"{key}={updates[config_key]}\n")
+                            updated_keys.add(key)
+                            continue
+                new_lines.append(line)
+            # Add any new keys not already in .env
+            for config_key, env_key in CONFIG_TO_ENV.items():
+                if config_key in updates and env_key not in updated_keys:
+                    new_lines.append(f"{env_key}={updates[config_key]}\n")
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
 
         return _read_config()
     except Exception as e:
