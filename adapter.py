@@ -1384,7 +1384,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return None
 
     async def query_remote_repeater(self, name: str, command: str,
-                                     timeout: float = 30.0) -> Dict[str, Any]:
+                                     timeout: float = 30.0,
+                                     password: str = "") -> Dict[str, Any]:
         """Send a CLI command to a remote repeater via DM and collect responses.
 
         Opens a SEPARATE TCP connection so it doesn't interfere with the
@@ -1392,7 +1393,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         Guest password is blank by default — read-only commands (ver, stats-*,
         get *, neighbors, clock) work without auth. Write commands require
-        admin password.
+        admin password. If password is provided, sends 'password <pw>' first.
 
         Returns {"success": True, "responses": [...], "node": {...}} or
         {"success": False, "error": "..."}.
@@ -1412,6 +1413,29 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return {"success": False, "error": f"TCP connect failed: {e}"}
 
         try:
+            # If password provided, authenticate first
+            if password:
+                ts = int(time.time())
+                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+                auth_frame = bytes([FRAME_SEND_MARKER]) + len(auth_cmd).to_bytes(2, "little") + auth_cmd
+                writer.write(auth_frame)
+                await writer.drain()
+                # Brief poll to consume auth response
+                await asyncio.sleep(3.0)
+                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
+                writer.write(poll)
+                await writer.drain()
+                try:
+                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                    if marker[0] == FRAME_RECV_MARKER:
+                        size = int.from_bytes(
+                            await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                        payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+                        # Consume auth response (OK or error)
+                except Exception:
+                    pass
+
             # Send the command as a DM
             timestamp = int(time.time())
             cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
@@ -1510,6 +1534,7 @@ MESHCORE_ADMIN_SCHEMA = {
         "Query a remote MeshCore repeater or node by sending CLI commands over the mesh. "
         "Opens a separate TCP connection so it doesn't interfere with the gateway. "
         "Guest password is blank by default — read-only commands work without auth. "
+        "For admin access, provide the repeater's password. "
         "Supported commands: ver, stats-core, stats-radio, stats-packets, get name, "
         "get lat, get lon, get role, get repeat, get guest.password, get owner.info, "
         "neighbors, clock. Use 'all' to run all read-only commands at once."
@@ -1524,6 +1549,10 @@ MESHCORE_ADMIN_SCHEMA = {
             "command": {
                 "type": "string",
                 "description": "CLI command to send (e.g. 'ver', 'stats-core', 'neighbors', 'all' for all read-only commands)"
+            },
+            "password": {
+                "type": "string",
+                "description": "Optional admin password for the repeater. If provided, sends 'password <pw>' before the command."
             },
         },
         "required": ["node", "command"],
@@ -1556,18 +1585,19 @@ ALL_READONLY_COMMANDS = [
 ]
 
 
-async def _handle_meshcore_admin(node: str, command: str) -> str:
+async def _handle_meshcore_admin(node: str, command: str, password: str = "") -> str:
     """Handler for meshcore_admin tool. Uses adapter singleton if available,
-    otherwise opens a standalone TCP connection for the query."""
+    otherwise opens a standalone TCP connection for the query.
+    If password is provided, sends 'password <pw>' before the command."""
     adapter = MeshCoreAdapter._instance
     if adapter is not None:
         if command == "all":
             all_results = {}
             for cmd in ALL_READONLY_COMMANDS:
-                result = await adapter.query_remote_repeater(node, cmd, timeout=15.0)
+                result = await adapter.query_remote_repeater(node, cmd, timeout=15.0, password=password)
                 all_results[cmd] = result.get("responses", []) if result.get("success") else result.get("error", "failed")
             return json.dumps({"success": True, "node": node, "results": all_results})
-        result = await adapter.query_remote_repeater(node, command)
+        result = await adapter.query_remote_repeater(node, command, password=password)
         return json.dumps(result)
 
     # Standalone: open fresh TCP connection, fetch contacts, send DM, poll
@@ -1634,6 +1664,29 @@ async def _handle_meshcore_admin(node: str, command: str) -> str:
         commands = ALL_READONLY_COMMANDS if command == "all" else [command]
         all_results = {}
         for cmd_text in commands:
+            # If password provided, authenticate first
+            if password:
+                ts = int(time.time())
+                auth_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
+                          ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+                auth_frame = bytes([FRAME_SEND_MARKER]) + len(auth_cmd).to_bytes(2, "little") + auth_cmd
+                writer.write(auth_frame)
+                await writer.drain()
+                # Brief poll to consume auth response
+                await asyncio.sleep(3.0)
+                poll = bytes([FRAME_SEND_MARKER]) + b"\x01\x00\x0A"
+                writer.write(poll)
+                await writer.drain()
+                try:
+                    marker = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                    if marker[0] == FRAME_RECV_MARKER:
+                        size = int.from_bytes(
+                            await asyncio.wait_for(reader.readexactly(2), timeout=2.0), "little")
+                        payload = await asyncio.wait_for(reader.readexactly(size), timeout=2.0)
+                        # Consume auth response (OK or error)
+                except Exception:
+                    pass
+
             # Send DM
             ts = int(time.time())
             dm_cmd = bytes([CMD_SEND_TXT_MSG, 0x00, 0]) + \
@@ -1885,7 +1938,9 @@ def register(ctx):
         toolset="meshcore",
         schema=MESHCORE_ADMIN_SCHEMA,
         handler=lambda args, **kw: _handle_meshcore_admin(
-            node=args.get("node", ""), command=args.get("command", "")),
+            node=args.get("node", ""),
+            command=args.get("command", ""),
+            password=args.get("password", "")),
         is_async=True,
         emoji="🛰️",
     )
