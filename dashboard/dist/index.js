@@ -576,12 +576,10 @@
     }
 
     function handleLoad() {
-      console.log("handleLoad called");
       setLoading(true);
       setSaveMsg(null);
       api("/config")
         .then(function (d) {
-          console.log("Load config response:", d);
           setConfig(d);
           setEdits({});
           setSaveMsg("✅ Loaded current settings");
@@ -605,9 +603,10 @@
             enable_dms: String(d.enable_dms || "").toLowerCase() === "true",
           });
           setLoading(false);
+          // Auto-clear success message after 3s
+          setTimeout(function () { setSaveMsg(null); }, 3000);
         })
         .catch(function (e) {
-          console.error("Load config error:", e);
           setLoading(false);
           setSaveMsg("❌ Load failed: " + String(e));
         });
