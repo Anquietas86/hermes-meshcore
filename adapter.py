@@ -1257,7 +1257,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
         # Self-message filter: skip DMs from our own node (echo of sent messages)
         if self._own_pubkey_prefix and pubkey_prefix == self._own_pubkey_prefix:
+            logger.debug("MeshCore: self-message filter blocked DM from %s", pubkey_prefix)
             return
+        logger.debug("MeshCore: DM from %s (own=%s) — passing through", pubkey_prefix, self._own_pubkey_prefix)
         # Prune to last 100 entries when set exceeds 200
         if len(self._seen_messages) > 200:
             self._seen_messages = set(list(self._seen_messages)[-100:])
