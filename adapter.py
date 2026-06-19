@@ -1804,45 +1804,46 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
             try:
                 # ── Login (required for all binary commands) ──
-                if password:
-                    login_cmd = bytes([CMD_SEND_LOGIN]) + full_key + password.encode("utf-8")
-                    logger.info("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
+                # Always attempt login — even with empty password (guest-level access).
+                # Without login, the repeater ignores binary commands.
+                login_cmd = bytes([CMD_SEND_LOGIN]) + full_key + password.encode("utf-8")
+                logger.info("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
+                try:
+                    pkt_type, payload = await self._conn.send_command(
+                        login_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                    logger.info("MeshCore: admin query login result: 0x%02x", pkt_type)
+                    if pkt_type != PKT_MSG_SENT:
+                        return {"success": False, "error": "Login rejected by node"}
+                except Exception as e:
+                    logger.info("MeshCore: admin query login exception: %s", e)
+                    return {"success": False, "error": f"Login failed: {e}"}
+
+                # Wait for LOGIN_SUCCESS or LOGIN_FAILED
+                login_deadline = time.time() + 15.0
+                logged_in = False
+                while time.time() < login_deadline:
                     try:
                         pkt_type, payload = await self._conn.send_command(
-                            login_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                        logger.info("MeshCore: admin query login result: 0x%02x", pkt_type)
-                        if pkt_type != PKT_MSG_SENT:
-                            return {"success": False, "error": "Login rejected by node"}
-                    except Exception as e:
-                        logger.info("MeshCore: admin query login exception: %s", e)
-                        return {"success": False, "error": f"Login failed: {e}"}
-
-                    # Wait for LOGIN_SUCCESS or LOGIN_FAILED
-                    login_deadline = time.time() + 15.0
-                    logged_in = False
-                    while time.time() < login_deadline:
-                        try:
-                            pkt_type, payload = await self._conn.send_command(
-                                b"\x0A",
-                                [PKT_LOGIN_SUCCESS, PKT_LOGIN_FAILED,
-                                 PKT_NO_MORE_MSGS, PKT_ERROR],
-                                timeout=5.0,
-                            )
-                            if pkt_type == PKT_LOGIN_SUCCESS:
-                                perms = payload[0] if payload else 0
-                                logger.info("MeshCore: admin query LOGIN SUCCESS perms=%d", perms)
-                                logged_in = True
-                                break
-                            elif pkt_type == PKT_LOGIN_FAILED:
-                                logger.info("MeshCore: admin query LOGIN FAILED")
-                                return {"success": False, "error": "Login rejected — wrong password or not authorized"}
-                            elif pkt_type == PKT_NO_MORE_MSGS:
-                                await asyncio.sleep(2.0)
-                                continue
-                        except Exception:
+                            b"\x0A",
+                            [PKT_LOGIN_SUCCESS, PKT_LOGIN_FAILED,
+                             PKT_NO_MORE_MSGS, PKT_ERROR],
+                            timeout=5.0,
+                        )
+                        if pkt_type == PKT_LOGIN_SUCCESS:
+                            perms = payload[0] if payload else 0
+                            logger.info("MeshCore: admin query LOGIN SUCCESS perms=%d", perms)
+                            logged_in = True
+                            break
+                        elif pkt_type == PKT_LOGIN_FAILED:
+                            logger.info("MeshCore: admin query LOGIN FAILED")
+                            return {"success": False, "error": "Login rejected — wrong password or not authorized"}
+                        elif pkt_type == PKT_NO_MORE_MSGS:
                             await asyncio.sleep(2.0)
-                    if not logged_in:
-                        return {"success": False, "error": "Login timed out — no response from repeater"}
+                            continue
+                    except Exception:
+                        await asyncio.sleep(2.0)
+                if not logged_in:
+                    return {"success": False, "error": "Login timed out — no response from repeater"}
 
                 # ── Send the command ──
                 mapping = BINARY_COMMAND_MAP.get(command)
