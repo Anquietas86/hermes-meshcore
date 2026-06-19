@@ -554,6 +554,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._discovered_channels: Set[int] = set()
         self._path_hash_size: int = 1
         self._self_info: dict = {}
+        self._own_pubkey_prefix: str = ""  # 6-byte hex prefix of our own public key
         self._poll_task: Optional[asyncio.Task] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._last_message_time: float = 0.0
@@ -596,6 +597,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             )
             if pkt_type == PKT_SELF_INFO:
                 self._self_info = MeshCoreRawConnection.parse_self_info(payload)
+                # Extract our own 6-byte pubkey prefix for self-message filtering
+                full_pubkey = self._self_info.get("public_key", "")
+                self._own_pubkey_prefix = full_pubkey[:12] if len(full_pubkey) >= 12 else ""
                 node_name = self._self_info.get("name", "")
                 if node_name:
                     # Derive bot name from node name (strip emoji/suffixes for @mention matching)
@@ -1089,6 +1093,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if self.monitor_channels is None or channel_idx not in self.monitor_channels:
             return
 
+        # Self-message filter: skip channel messages from our own node (echo of sent messages)
+        sender_name_raw = text.split(":", 1)[0].strip() if ":" in text else ""
+        node_name = self._self_info.get("name", "") if self._self_info else ""
+        if node_name and sender_name_raw == node_name:
+            return
+
         sender_name = "unknown"
         user_prompt = text
         if ":" in text:
@@ -1147,6 +1157,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if dedup_key in self._seen_messages:
             return
         self._seen_messages.add(dedup_key)
+
+        # Self-message filter: skip DMs from our own node (echo of sent messages)
+        if self._own_pubkey_prefix and pubkey_prefix == self._own_pubkey_prefix:
+            return
         # Prune to last 100 entries when set exceeds 200
         if len(self._seen_messages) > 200:
             self._seen_messages = set(list(self._seen_messages)[-100:])
