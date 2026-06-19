@@ -760,10 +760,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
         pubkey_prefix = msg.get("pubkey_prefix", "")
         if self._admin_query_target and pubkey_prefix.lower() == self._admin_query_target.lower():
             text = msg.get("text", "")
+            logger.info("MeshCore: admin query CAPTURED response from %s: %s",
+                         pubkey_prefix, text[:80] if text else "(empty)")
             if text:
                 self._admin_query_responses.append(text)
-                logger.debug("MeshCore: admin query captured response from %s: %s",
-                             pubkey_prefix, text[:60])
             return
         await self._handle_direct_message(msg)
 
@@ -1603,6 +1603,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             # handler from stealing repeater CLI responses.
             self._admin_query_target = pubkey_prefix
             self._admin_query_responses = []
+            logger.info("MeshCore: admin query START target=%s cmd=%s pw=%s",
+                        pubkey_prefix, command, "yes" if password else "no")
 
             try:
                 # Send auth DM if password provided
@@ -1610,22 +1612,30 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     ts = int(time.time())
                     auth_cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
                               ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
+                    logger.info("MeshCore: admin query sending auth: %s", auth_cmd.hex()[:40])
                     try:
-                        await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                    except Exception:
-                        pass
+                        pkt_type, _ = await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                        logger.info("MeshCore: admin query auth result: 0x%02x", pkt_type)
+                    except Exception as e:
+                        logger.info("MeshCore: admin query auth exception: %s", e)
 
                 # Send the command DM
                 ts = int(time.time())
                 cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
                       ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
+                logger.info("MeshCore: admin query sending cmd: %s", cmd.hex()[:40])
                 try:
                     pkt_type, _ = await self._conn.send_command(
                         cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                    logger.info("MeshCore: admin query cmd result: 0x%02x", pkt_type)
                     if pkt_type != PKT_MSG_SENT:
                         return {"success": False, "error": "Node rejected send"}
                 except Exception as e:
+                    logger.info("MeshCore: admin query cmd exception: %s", e)
                     return {"success": False, "error": f"Send failed: {e}"}
+
+                logger.info("MeshCore: admin query starting poll, captured_so_far=%d",
+                            len(self._admin_query_responses))
 
                 # Poll for responses. The capture mechanism in _route_dm
                 # collects matching DMs into _admin_query_responses as they
@@ -1641,6 +1651,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                              PKT_NO_MORE_MSGS, PKT_ERROR],
                             timeout=5.0,
                         )
+                        logger.debug("MeshCore: admin poll got type=0x%02x payload=%s",
+                                     pkt_type, payload[:30].hex() if payload else "empty")
                         if pkt_type in (PKT_CONTACT_MSG_RECV, PKT_CONTACT_MSG_RECV_V3):
                             # Direct poll response — bypassed _route_dm, parse manually
                             msg = MeshCoreRawConnection.parse_contact_msg(
