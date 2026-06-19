@@ -471,7 +471,7 @@
       if (!queryNode.trim()) { setQueryResult({ error: "Enter a node name or pubkey prefix" }); return; }
       setQuerying(true);
       setQueryResult(null);
-      api("/admin/query", { method: "POST", body: JSON.stringify({ node: queryNode.trim(), command: queryCmd.trim(), password: queryPw }) })
+      api("/admin/query", { method: "POST", body: { node: queryNode.trim(), command: queryCmd.trim(), password: queryPw } })
         .then(function (d) {
           if (!d.success) { setQuerying(false); setQueryResult({ error: d.detail || "Submit failed" }); return; }
           var pollCount = 0;
