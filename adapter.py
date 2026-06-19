@@ -552,6 +552,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._conn: Optional[MeshCoreRawConnection] = None
         self._contacts: Dict[str, dict] = {}
         self._discovered_channels: Set[int] = set()
+        self._channel_names: Dict[int, str] = {}  # channel index → name
         self._path_hash_size: int = 1
         self._self_info: dict = {}
         self._own_pubkey_prefix: str = ""  # 6-byte hex prefix of our own public key
@@ -672,6 +673,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             self._conn = None
         self._contacts.clear()
         self._discovered_channels.clear()
+        self._channel_names.clear()
 
     async def _load_contacts(self) -> None:
         """Load all contacts from the node."""
@@ -716,6 +718,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     name = ch.get("channel_name", "")
                     self._discovered_channels.add(idx)
                     if name:
+                        self._channel_names[idx] = name
                         logger.info("MeshCore: loaded channel %d: %s", idx, name)
             except Exception as e:
                 logger.debug("MeshCore: channel %d load failed: %s", idx, e)
@@ -837,6 +840,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 "stats": self._build_stats_info(),
                 "contacts": self._build_contacts_info(),
                 "channels": sorted(self._discovered_channels) if self._discovered_channels else [],
+                "channel_names": {str(idx): name for idx, name in self._channel_names.items()},
                 "last_message_ago_s": round(time.time() - self._last_message_time, 1) if self._last_message_time else None,
                 "dms_enabled": self.enable_dms,
                 "admin": {
@@ -872,14 +876,19 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     def _build_stats_info(self) -> dict:
         s = self._stats_cache or {}
+        core = s.get("core", {})
+        radio = s.get("radio", {})
+        packets = s.get("packets", {})
         return {
-            "battery_mv": s.get("battery"),
-            "uptime_s": s.get("uptime"),
-            "tx_packets": s.get("tx_packets"),
-            "rx_packets": s.get("rx_packets"),
-            "noise": s.get("noise"),
-            "rssi": s.get("rssi"),
-            "snr": s.get("snr"),
+            "battery_mv": core.get("battery_mv"),
+            "uptime_s": core.get("uptime_secs"),
+            "errors": core.get("errors"),
+            "queue_len": core.get("queue_len"),
+            "noise": radio.get("noise_floor"),
+            "rssi": radio.get("last_rssi"),
+            "snr": radio.get("last_snr"),
+            "tx_packets": packets.get("sent"),
+            "rx_packets": packets.get("recv"),
         }
 
     def _build_contacts_info(self) -> dict:

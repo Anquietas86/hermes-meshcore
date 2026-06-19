@@ -266,8 +266,10 @@
           React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "📢 Channels (" + data.channels.length + ")"),
           React.createElement("div", { className: "mc-channel-list" },
             data.channels.map(function (ch) {
+              var names = data.channel_names || {};
+              var name = names[String(ch)] || "";
               return React.createElement("div", { key: ch, className: "mc-channel-item" },
-                React.createElement("span", { className: "mc-channel-name" }, ch),
+                React.createElement("span", { className: "mc-channel-name" }, name || ("Channel " + ch)),
                 React.createElement("span", { className: "mc-channel-badge" }, "ch " + ch)
               );
             })
