@@ -773,6 +773,20 @@ class MeshCoreAdapter(BasePlatformAdapter):
             if pubkey:
                 self._contacts[pubkey] = c
                 logger.info("MeshCore: new contact: %s", c.get("adv_name", pubkey[:12]))
+        elif pkt_type in (PKT_BINARY_RESPONSE, PKT_STATUS_RESPONSE, PKT_TELEMETRY_RESPONSE):
+            # Binary response push — capture for admin query if active
+            if self._admin_query_target:
+                logger.info("MeshCore: admin query CAPTURED binary push type=0x%02x len=%d",
+                             pkt_type, len(payload) if payload else 0)
+                if pkt_type == PKT_STATUS_RESPONSE:
+                    parsed = self._parse_status_response(payload, self._admin_query_target)
+                elif pkt_type == PKT_BINARY_RESPONSE:
+                    parsed = self._parse_binary_response(payload, self._admin_query_target)
+                else:
+                    parsed = f"[TELEMETRY] {payload.hex() if payload else 'empty'}"
+                self._admin_query_responses.append(parsed)
+            else:
+                logger.debug("MeshCore: binary push type=0x%02x (no admin query active)", pkt_type)
         # ACK, MESSAGES_WAITING, ADVERTISEMENT — silently consumed
 
     async def _route_dm(self, msg: dict) -> None:
