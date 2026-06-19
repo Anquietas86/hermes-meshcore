@@ -67,6 +67,7 @@ CMD_GET_STATS = 0x38
 CMD_RESET_PATH = 0x0D
 CMD_GET_SELF_TELEMETRY = 0x27
 CMD_SET_OTHER_PARAMS = 0x26
+CMD_SEND_LOGIN = 0x1a  # Login to remote repeater/room server
 
 # Response packet types
 PKT_OK = 0x00
@@ -87,6 +88,8 @@ PKT_CHANNEL_MSG_RECV_V3 = 0x11
 PKT_CHANNEL_INFO = 0x12
 PKT_STATS = 0x18
 PKT_TELEMETRY_RESPONSE = 0x8B
+PKT_LOGIN_SUCCESS = 0x85  # Remote login accepted
+PKT_LOGIN_FAILED = 0x86   # Remote login rejected
 
 # Stats sub-types
 STATS_TYPE_CORE = 0x00
@@ -1607,19 +1610,54 @@ class MeshCoreAdapter(BasePlatformAdapter):
                         pubkey_prefix, command, "yes" if password else "no")
 
             try:
-                # Send auth DM if password provided
+                # Send proper login request (opcode 0x1a) with full 32-byte public key.
+                # This is the same protocol the HA integration and meshcore-cli use —
+                # the companion node sends a login request over the mesh, the repeater
+                # authenticates it and establishes a session. Without this, the repeater
+                # ignores all subsequent commands.
                 if password:
-                    ts = int(time.time())
-                    auth_cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
-                              ts.to_bytes(4, "little") + dst_bytes + f"password {password}".encode("utf-8")
-                    logger.info("MeshCore: admin query sending auth: %s", auth_cmd.hex()[:40])
+                    full_key = bytes.fromhex(pubkey)  # 32 bytes
+                    login_cmd = bytes([CMD_SEND_LOGIN]) + full_key + password.encode("utf-8")
+                    logger.info("MeshCore: admin query sending login: %s", login_cmd.hex()[:40])
                     try:
-                        pkt_type, _ = await self._conn.send_command(auth_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
-                        logger.info("MeshCore: admin query auth result: 0x%02x", pkt_type)
+                        pkt_type, payload = await self._conn.send_command(
+                            login_cmd, [PKT_MSG_SENT, PKT_ERROR], timeout=10.0)
+                        logger.info("MeshCore: admin query login result: 0x%02x", pkt_type)
+                        if pkt_type != PKT_MSG_SENT:
+                            return {"success": False, "error": "Login rejected by node"}
                     except Exception as e:
-                        logger.info("MeshCore: admin query auth exception: %s", e)
+                        logger.info("MeshCore: admin query login exception: %s", e)
+                        return {"success": False, "error": f"Login failed: {e}"}
 
-                # Send the command DM
+                    # Wait for LOGIN_SUCCESS or LOGIN_FAILED response from the repeater.
+                    # This arrives as an unsolicited frame during subsequent commands.
+                    login_deadline = time.time() + 15.0
+                    logged_in = False
+                    while time.time() < login_deadline:
+                        try:
+                            pkt_type, payload = await self._conn.send_command(
+                                b"\x0A",
+                                [PKT_LOGIN_SUCCESS, PKT_LOGIN_FAILED,
+                                 PKT_NO_MORE_MSGS, PKT_ERROR],
+                                timeout=5.0,
+                            )
+                            if pkt_type == PKT_LOGIN_SUCCESS:
+                                perms = payload[0] if payload else 0
+                                logger.info("MeshCore: admin query LOGIN SUCCESS perms=%d", perms)
+                                logged_in = True
+                                break
+                            elif pkt_type == PKT_LOGIN_FAILED:
+                                logger.info("MeshCore: admin query LOGIN FAILED")
+                                return {"success": False, "error": "Login rejected — wrong password or not authorized"}
+                            elif pkt_type == PKT_NO_MORE_MSGS:
+                                await asyncio.sleep(2.0)
+                                continue
+                        except Exception:
+                            await asyncio.sleep(2.0)
+                    if not logged_in:
+                        return {"success": False, "error": "Login timed out — no response from repeater"}
+
+                # Send the command DM (txt_type=1 = command, matching meshcore_py send_cmd)
                 ts = int(time.time())
                 cmd = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
                       ts.to_bytes(4, "little") + dst_bytes + command.encode("utf-8")
