@@ -3,7 +3,7 @@
   "label": "MeshCore",
   "description": "MeshCore LoRa mesh radio platform adapter for Hermes Agent",
   "icon": "Radio",
-  "version": "1.5.3",
+  "version": "1.9.0",
   "tab": { "path": "/meshcore", "position": "end" },
   "entry": "dist/index.js",
   "api": "api.py"
