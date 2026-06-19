@@ -1,17 +1,10 @@
 {
   "name": "meshcore-platform",
-  "version": "1.5.2",
+  "label": "MeshCore",
   "description": "MeshCore LoRa mesh radio platform adapter for Hermes Agent",
-  "author": "Nous Research",
-  "slots": [
-    {
-      "type": "tab",
-      "id": "meshcore-status",
-      "label": "📡 MeshCore",
-      "icon": "antenna"
-    }
-  ],
-  "api": {
-    "router": "api.py"
-  }
+  "icon": "Radio",
+  "version": "1.5.3",
+  "tab": { "path": "/meshcore", "position": "end" },
+  "entry": "dist/index.js",
+  "api": "api.py"
 }
