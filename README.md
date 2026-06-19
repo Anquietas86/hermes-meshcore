@@ -20,6 +20,23 @@ standard library only.
 - **Remote repeater admin** — query remote repeaters via CLI commands over the mesh (`meshcore_admin` tool)
 - **Contact lookup** — instant node details from the contact cache (`meshcore_contact` tool)
 - **Password auth** — admin password support for repeaters that require authentication
+- **Live dashboard** — real-time node telemetry, contacts, channels, and configuration management via the Hermes web dashboard
+
+## Dashboard
+
+The plugin includes a live dashboard tab at `/meshcore` showing:
+
+- **📡 Connection & Contacts** — gateway status, host, last message, DMs, contact counts (repeaters/clients/rooms), channel list with names
+- **🖥️ Node & Telemetry** — node name, pubkey, location, radio params (frequency/bandwidth/SF/CR), battery voltage, uptime, TX/RX packets, signal (noise/RSSI/SNR)
+- **⚙️ Configuration** — edit all gateway settings inline:
+  - **Channel checkbox matrix** — toggle Monitor/Admin/Mention per channel
+  - **Access toggles** — Allow All Users, Enable DMs (checkboxes)
+  - **Text fields** — Admin Nodes, Allowed Users (pubkey prefixes)
+  - **📋 Load Current** — revert unsaved changes
+  - **💾 Save Config** — writes to `.env` and `config.yaml`
+  - **🔄 Restart Gateway** — applies changes immediately
+
+Data refreshes every 5 seconds from a shared state file written by the gateway adapter — no second TCP connection to the node required.
 
 ## Quick Install
 
