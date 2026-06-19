@@ -242,6 +242,14 @@
           outline: none;
           border-color: var(--color-accent, #6366f1);
         }
+        .mc-select {
+          cursor: pointer;
+          appearance: auto;
+        }
+        .mc-select option {
+          background: var(--color-bg, #111);
+          color: var(--color-text);
+        }
         .mc-config-actions {
           margin-top: 0.75rem;
           display: flex;
@@ -461,6 +469,29 @@
     var _d = useState(false), querying = _d[0], setQuerying = _d[1];
     var _e = useState(null), queryResult = _e[0], setQueryResult = _e[1];
     var _f = useState(null), queryPollTimer = _f[0], setQueryPollTimer = _f[1];
+    var _g = useState([]), knownNodes = _g[0], setKnownNodes = _g[1];
+
+    var COMMANDS = [
+      { value: "stats-core", label: "stats-core — CPU, battery, uptime" },
+      { value: "stats-radio", label: "stats-radio — RF params, noise, RSSI" },
+      { value: "stats-packets", label: "stats-packets — TX/RX counts" },
+      { value: "ver", label: "ver — firmware version" },
+      { value: "neighbors", label: "neighbors — visible nodes" },
+      { value: "clock", label: "clock — node time" },
+      { value: "get name", label: "get name — node name" },
+      { value: "get lat", label: "get lat — latitude" },
+      { value: "get lon", label: "get lon — longitude" },
+      { value: "get role", label: "get role — node role" },
+      { value: "get repeat", label: "get repeat — repeater settings" },
+      { value: "all", label: "all — run all read-only commands" },
+    ];
+
+    // Fetch known nodes on mount
+    useEffect(function () {
+      api("/nodes")
+        .then(function (d) { if (d.nodes) setKnownNodes(d.nodes); })
+        .catch(function () {});
+    }, []);
 
     // Cleanup poll timer on unmount
     useEffect(function () {
@@ -468,7 +499,7 @@
     }, []);
 
     function handleAdminQuery() {
-      if (!queryNode.trim()) { setQueryResult({ error: "Enter a node name or pubkey prefix" }); return; }
+      if (!queryNode.trim()) { setQueryResult({ error: "Select a node" }); return; }
       setQuerying(true);
       setQueryResult(null);
       api("/admin/query", { method: "POST", body: { node: queryNode.trim(), command: queryCmd.trim(), password: queryPw } })
@@ -510,22 +541,29 @@
       React.createElement(C.CardContent, null,
         React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🔧 Remote Repeater Admin"),
         React.createElement("div", { className: "mc-admin-row" },
-          React.createElement("input", {
-            className: "mc-config-input",
-            type: "text",
+          React.createElement("select", {
+            className: "mc-config-input mc-select",
             value: queryNode,
             onChange: function (e) { setQueryNode(e.target.value); },
-            placeholder: "Node name or pubkey prefix",
             style: { flex: 2 },
-          }),
-          React.createElement("input", {
-            className: "mc-config-input",
-            type: "text",
+          },
+            React.createElement("option", { value: "" }, "— Select a node —"),
+            knownNodes.map(function (n) {
+              var label = n.name || n.pubkey_prefix;
+              if (n.out_path_len != null && n.out_path_len >= 0) label += " (" + n.out_path_len + " hops)";
+              return React.createElement("option", { key: n.pubkey_prefix, value: n.pubkey_prefix }, label);
+            })
+          ),
+          React.createElement("select", {
+            className: "mc-config-input mc-select",
             value: queryCmd,
             onChange: function (e) { setQueryCmd(e.target.value); },
-            placeholder: "Command (e.g. stats-core)",
             style: { flex: 1 },
-          }),
+          },
+            COMMANDS.map(function (c) {
+              return React.createElement("option", { key: c.value, value: c.value }, c.label);
+            })
+          ),
           React.createElement("input", {
             className: "mc-config-input",
             type: "text",

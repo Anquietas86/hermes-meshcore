@@ -186,6 +186,15 @@ async def get_contacts():
     })
 
 
+@router.get("/nodes")
+async def get_nodes():
+    """List known repeater nodes for the admin query dropdown."""
+    state = _read_state()
+    if not state.get("connected"):
+        return JSONResponse({"error": state.get("error", "Gateway not running")}, status_code=503)
+    return JSONResponse({"nodes": state.get("known_nodes", [])})
+
+
 @router.get("/health")
 async def get_health():
     """Quick health check — connected, battery, last message."""

@@ -844,6 +844,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 "node": self._build_node_info(),
                 "stats": self._build_stats_info(),
                 "contacts": self._build_contacts_info(),
+                "known_nodes": self._build_known_nodes(),
                 "channels": sorted(self._discovered_channels) if self._discovered_channels else [],
                 "channel_names": {str(idx): name for idx, name in self._channel_names.items()},
                 "last_message_ago_s": round(time.time() - self._last_message_time, 1) if self._last_message_time else None,
@@ -935,6 +936,22 @@ class MeshCoreAdapter(BasePlatformAdapter):
             "clients": sum(1 for c in contacts.values() if c.get("type") == 1),
             "rooms": sum(1 for c in contacts.values() if c.get("type") == 3),
         }
+
+    def _build_known_nodes(self) -> list:
+        """Return list of known repeater nodes for the admin query dropdown."""
+        contacts = self._contacts or {}
+        nodes = []
+        for c in contacts.values():
+            if c.get("type") == 2:  # repeater
+                nodes.append({
+                    "name": c.get("adv_name", ""),
+                    "pubkey_prefix": c.get("public_key", "")[:12] if c.get("public_key") else "",
+                    "lat": c.get("adv_lat"),
+                    "lon": c.get("adv_lon"),
+                    "out_path_len": c.get("out_path_len"),
+                })
+        nodes.sort(key=lambda n: n.get("name", ""))
+        return nodes
 
     # ── Watchdog ──────────────────────────────────────────────────────────
 
