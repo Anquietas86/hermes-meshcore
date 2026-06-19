@@ -223,3 +223,60 @@ async def restart_gateway():
     """Restart the meshcore gateway to apply config changes."""
     result = _restart_gateway()
     return JSONResponse(result)
+
+
+# ── Admin query routes ──────────────────────────────────────────────────────
+
+ADMIN_REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
+ADMIN_RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
+
+
+@router.post("/admin/query")
+async def submit_admin_query(body: dict):
+    """Submit an admin query for a remote repeater. The gateway's keepalive
+    loop picks it up within 15s and writes the response file."""
+    node = body.get("node", "").strip()
+    command = body.get("command", "").strip()
+    password = body.get("password", "")
+
+    if not node or not command:
+        raise HTTPException(status_code=400, detail="node and command are required")
+
+    # Check if a request is already pending
+    if os.path.exists(ADMIN_REQUEST_FILE):
+        raise HTTPException(status_code=409, detail="An admin query is already in progress")
+
+    request_id = str(int(time.time()))
+    request = {
+        "request_id": request_id,
+        "node": node,
+        "command": command,
+        "password": password,
+        "submitted_at": time.time(),
+    }
+    with open(ADMIN_REQUEST_FILE, "w") as f:
+        json.dump(request, f)
+
+    return JSONResponse({"success": True, "request_id": request_id, "message": "Query submitted — gateway will process within 15s"})
+
+
+@router.get("/admin/result")
+async def get_admin_result(request_id: str = ""):
+    """Poll for the result of an admin query. Returns the response if complete,
+    or status=pending if still waiting."""
+    if os.path.exists(ADMIN_REQUEST_FILE):
+        return JSONResponse({"status": "pending", "message": "Request not yet picked up by gateway"})
+
+    if not os.path.exists(ADMIN_RESPONSE_FILE):
+        return JSONResponse({"status": "pending", "message": "Waiting for response…"})
+
+    with open(ADMIN_RESPONSE_FILE) as f:
+        result = json.load(f)
+
+    # If request_id provided, only return matching result
+    if request_id and result.get("request_id") != request_id:
+        return JSONResponse({"status": "pending", "message": "Different request in progress"})
+
+    # Clean up response file after reading
+    os.remove(ADMIN_RESPONSE_FILE)
+    return JSONResponse({"status": "complete", "result": result})

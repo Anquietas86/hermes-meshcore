@@ -818,6 +818,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 failures = 0
                 # Write state file for dashboard after successful keepalive
                 self._write_state_file()
+                # Check for pending admin requests from dashboard
+                await self._process_admin_request()
             except Exception as e:
                 failures += 1
                 logger.warning("MeshCore: keepalive failed (%d): %s", failures, e)
@@ -829,6 +831,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
     # ── State file for dashboard ──────────────────────────────────────────
 
     STATE_FILE = "/tmp/hermes-meshcore-state.json"
+    ADMIN_REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
+    ADMIN_RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
 
     def _write_state_file(self):
         """Write current adapter state to a shared JSON file for the dashboard API."""
@@ -858,6 +862,34 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 json.dump(state, f)
         except Exception:
             pass  # Non-critical — dashboard will show stale data
+
+    async def _process_admin_request(self):
+        """Check for a pending admin request file from the dashboard, process it,
+        and write the response. Runs inside the keepalive loop (every 15s)."""
+        try:
+            if not os.path.exists(self.ADMIN_REQUEST_FILE):
+                return
+            with open(self.ADMIN_REQUEST_FILE) as f:
+                req = json.load(f)
+            # Remove request file so we don't re-process it
+            os.remove(self.ADMIN_REQUEST_FILE)
+
+            node = req.get("node", "")
+            command = req.get("command", "")
+            password = req.get("password", "")
+            request_id = req.get("request_id", "")
+
+            logger.info("MeshCore: processing admin request %s: %s → %s", request_id, node, command)
+            result = await self.query_remote_repeater(node, command, password=password, timeout=30.0)
+            result["request_id"] = request_id
+            result["completed_at"] = time.time()
+
+            with open(self.ADMIN_RESPONSE_FILE, "w") as f:
+                json.dump(result, f)
+            logger.info("MeshCore: admin request %s complete: %s", request_id,
+                        "success" if result.get("success") else "failed")
+        except Exception as e:
+            logger.warning("MeshCore: admin request processing failed: %s", e)
 
     def _build_node_info(self) -> dict:
         si = self._self_info or {}
