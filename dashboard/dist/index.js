@@ -279,6 +279,46 @@
           margin-top: 0.5rem;
           font-size: 0.8rem;
         }
+        .mc-ch-matrix {
+          display: flex;
+          flex-direction: column;
+          gap: 0.15rem;
+        }
+        .mc-ch-row {
+          display: grid;
+          grid-template-columns: 1fr 60px 60px 60px;
+          align-items: center;
+          gap: 0.25rem;
+          padding: 0.25rem 0;
+          border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.04));
+          font-size: 0.8rem;
+        }
+        .mc-ch-row:last-child { border-bottom: none; }
+        .mc-ch-header {
+          font-size: 0.7rem;
+          color: var(--color-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+          padding-bottom: 0.35rem;
+        }
+        .mc-ch-name {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .mc-ch-cb {
+          justify-self: center;
+          width: 14px;
+          height: 14px;
+          accent-color: var(--color-accent, #6366f1);
+          cursor: pointer;
+        }
+        .mc-ch-header .mc-ch-cb {
+          width: auto;
+          height: auto;
+          accent-color: unset;
+        }
       `),
 
       // ── Connection card ────────────────────────────────────────────
@@ -420,12 +460,15 @@
       })(),
 
       // ── Configuration card ──────────────────────────────────────────
-      React.createElement(ConfigCard, {})
+      React.createElement(ConfigCard, { channels: data.channels, channelNames: data.channel_names })
     );
   }
 
   // ── ConfigCard sub-component ────────────────────────────────────────
-  function ConfigCard() {
+  function ConfigCard(props) {
+    var channels = props.channels || [];
+    var channelNames = props.channelNames || {};
+
     var _React = React;
     var useState = _React.useState;
     var useEffect = _React.useEffect;
@@ -436,24 +479,39 @@
     var _d = useState(false), restarting = _d[0], setRestarting = _d[1];
     var _e = useState(null), saveMsg = _e[0], setSaveMsg = _e[1];
 
+    // Channel checkbox state: { chIndex: { monitor: bool, admin: bool, mention: bool } }
+    var _f = useState({}), chChecks = _f[0], setChChecks = _f[1];
+
     useEffect(function () {
       api("/config")
-        .then(function (d) { setConfig(d); })
+        .then(function (d) {
+          setConfig(d);
+          // Parse current config into checkbox state
+          var checks = {};
+          var adminChs = parseCsv(d.admin_channels || "");
+          var monitorChs = parseCsv(d.monitor_channels || "");
+          var mentionChs = parseCsv(d.require_mention_channels || "");
+          channels.forEach(function (ch) {
+            var chStr = String(ch);
+            checks[chStr] = {
+              monitor: monitorChs.indexOf(chStr) !== -1,
+              admin: adminChs.indexOf(chStr) !== -1,
+              mention: mentionChs.indexOf(chStr) !== -1,
+            };
+          });
+          setChChecks(checks);
+        })
         .catch(function () {});
     }, []);
 
     if (!config) return null;
     if (config.error) return null;
 
-    var fields = [
-      { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
-      { key: "admin_channels", label: "Admin Channels", hint: "channel indices, comma-separated" },
-      { key: "monitor_channels", label: "Monitor Channels", hint: "channels to listen on" },
-      { key: "require_mention_channels", label: "Mention-Gated Channels", hint: "require @mention, comma-separated" },
-      { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
-      { key: "allow_all_users", label: "Allow All Users", hint: "true/false" },
-      { key: "enable_dms", label: "Enable DMs", hint: "true/false" },
-    ];
+    // Parse comma-separated string to array of trimmed strings
+    function parseCsv(s) {
+      if (!s) return [];
+      return s.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+    }
 
     function handleChange(key, value) {
       var next = {};
@@ -462,12 +520,42 @@
       setEdits(next);
     }
 
+    function toggleChannel(ch, col) {
+      var next = {};
+      for (var k in chChecks) { next[k] = Object.assign({}, chChecks[k]); }
+      if (!next[ch]) next[ch] = { monitor: false, admin: false, mention: false };
+      next[ch][col] = !next[ch][col];
+      setChChecks(next);
+    }
+
     function handleSave() {
+      // Build channel config from checkbox state
+      var monitorChs = [];
+      var adminChs = [];
+      var mentionChs = [];
+      for (var ch in chChecks) {
+        if (chChecks[ch].monitor) monitorChs.push(ch);
+        if (chChecks[ch].admin) adminChs.push(ch);
+        if (chChecks[ch].mention) mentionChs.push(ch);
+      }
+      var channelEdits = {
+        monitor_channels: monitorChs.join(", "),
+        admin_channels: adminChs.join(", "),
+        require_mention_channels: mentionChs.join(", "),
+      };
+
+      // Merge text field edits with channel checkbox edits
       var changed = {};
       var hasChanges = false;
       for (var k in edits) {
         if (edits[k] !== config[k]) {
           changed[k] = edits[k];
+          hasChanges = true;
+        }
+      }
+      for (var ck in channelEdits) {
+        if (channelEdits[ck] !== (config[ck] || "")) {
+          changed[ck] = channelEdits[ck];
           hasChanges = true;
         }
       }
@@ -501,11 +589,63 @@
         });
     }
 
+    var textFields = [
+      { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
+      { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
+      { key: "allow_all_users", label: "Allow All Users", hint: "true/false" },
+      { key: "enable_dms", label: "Enable DMs", hint: "true/false" },
+    ];
+
     return React.createElement(C.Card, null,
       React.createElement(C.CardContent, null,
         React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "⚙️ Configuration"),
+
+        // ── Channel checkbox matrix ──────────────────────────────────
+        channels.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
+          React.createElement("div", { className: "mc-config-label", style: { marginBottom: "0.35rem" } }, "Channel Roles"),
+          React.createElement("div", { className: "mc-ch-matrix" },
+            // Header row
+            React.createElement("div", { className: "mc-ch-row mc-ch-header" },
+              React.createElement("span", { className: "mc-ch-name" }, "Channel"),
+              React.createElement("span", { className: "mc-ch-cb" }, "Monitor"),
+              React.createElement("span", { className: "mc-ch-cb" }, "Admin"),
+              React.createElement("span", { className: "mc-ch-cb" }, "Mention")
+            ),
+            channels.map(function (ch) {
+              var chStr = String(ch);
+              var name = channelNames[chStr] || ("Channel " + ch);
+              var ck = chChecks[chStr] || { monitor: false, admin: false, mention: false };
+              return React.createElement("div", { key: ch, className: "mc-ch-row" },
+                React.createElement("span", { className: "mc-ch-name" }, name + " (ch " + ch + ")"),
+                React.createElement("input", {
+                  type: "checkbox",
+                  className: "mc-ch-cb",
+                  checked: ck.monitor,
+                  onChange: function () { toggleChannel(chStr, "monitor"); },
+                  title: "Monitor this channel",
+                }),
+                React.createElement("input", {
+                  type: "checkbox",
+                  className: "mc-ch-cb",
+                  checked: ck.admin,
+                  onChange: function () { toggleChannel(chStr, "admin"); },
+                  title: "Trusted — no @mention required",
+                }),
+                React.createElement("input", {
+                  type: "checkbox",
+                  className: "mc-ch-cb",
+                  checked: ck.mention,
+                  onChange: function () { toggleChannel(chStr, "mention"); },
+                  title: "Require @mention to respond",
+                })
+              );
+            })
+          )
+        ),
+
+        // ── Text fields ──────────────────────────────────────────────
         React.createElement("div", { className: "mc-config-fields" },
-          fields.map(function (f) {
+          textFields.map(function (f) {
             var val = edits.hasOwnProperty(f.key) ? edits[f.key] : (config[f.key] || "");
             return React.createElement("div", { key: f.key, className: "mc-config-field" },
               React.createElement("label", { className: "mc-config-label" }, f.label),
@@ -519,6 +659,7 @@
             );
           })
         ),
+
         React.createElement("div", { className: "mc-config-actions" },
           React.createElement("button", {
             className: "mc-btn mc-btn-save",
