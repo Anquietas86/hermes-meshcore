@@ -19,7 +19,20 @@ router = APIRouter()
 
 STATE_FILE = "/tmp/hermes-meshcore-state.json"
 MAX_STALE_SECONDS = 60
-CONFIG_PATH = os.path.expanduser("~/.hermes/profiles/meshcore/config.yaml")
+
+# Auto-detect which profile runs MeshCore — check meshcore profile first, fall back to default
+def _detect_profile() -> str:
+    """Return the profile name that runs MeshCore (meshcore or default)."""
+    meshcore_cfg = os.path.expanduser("~/.hermes/profiles/meshcore/config.yaml")
+    if os.path.exists(meshcore_cfg):
+        return "meshcore"
+    return "default"
+
+def _config_path() -> str:
+    return os.path.expanduser(f"~/.hermes/profiles/{_detect_profile()}/config.yaml")
+
+def _env_path() -> str:
+    return os.path.expanduser(f"~/.hermes/profiles/{_detect_profile()}/.env")
 
 # ── Config keys we expose for editing ──────────────────────────────────────
 CONFIG_KEYS = [
@@ -54,7 +67,7 @@ def _read_config() -> dict:
     """Read meshcore platform config — .env first (what gateway uses), then config.yaml extra."""
     try:
         # Read .env vars (what the gateway actually uses)
-        env_path = os.path.expanduser("~/.hermes/profiles/meshcore/.env")
+        env_path = _env_path()
         env_vars = {}
         if os.path.exists(env_path):
             with open(env_path) as f:
@@ -65,7 +78,7 @@ def _read_config() -> dict:
                         env_vars[key.strip()] = val.strip().strip('"').strip("'")
 
         # Read config.yaml extra (fallback)
-        with open(CONFIG_PATH) as f:
+        with open(_config_path()) as f:
             cfg = yaml.safe_load(f) or {}
         extra = (
             cfg.get("platforms", {})
@@ -103,7 +116,7 @@ def _write_config(updates: dict) -> dict:
     """Write meshcore platform config to both .env (what gateway reads) and config.yaml extra."""
     try:
         # Write to config.yaml extra
-        with open(CONFIG_PATH) as f:
+        with open(_config_path()) as f:
             cfg = yaml.safe_load(f) or {}
         cfg.setdefault("platforms", {}).setdefault("meshcore", {}).setdefault("extra", {})
         extra = cfg["platforms"]["meshcore"]["extra"]
@@ -114,7 +127,7 @@ def _write_config(updates: dict) -> dict:
             yaml.safe_dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
         # Write to .env (what the gateway actually reads)
-        env_path = os.path.expanduser("~/.hermes/profiles/meshcore/.env")
+        env_path = _env_path()
         if os.path.exists(env_path):
             with open(env_path) as f:
                 env_lines = f.readlines()
@@ -148,7 +161,7 @@ def _restart_gateway() -> dict:
     """Trigger a gateway restart via hermes CLI."""
     try:
         result = subprocess.run(
-            ["hermes", "--profile", "meshcore", "gateway", "restart"],
+            ["hermes", "--profile", _detect_profile(), "gateway", "restart"],
             capture_output=True, text=True, timeout=30,
         )
         return {
