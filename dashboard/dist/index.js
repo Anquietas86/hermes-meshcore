@@ -213,6 +213,72 @@
           color: var(--color-warning, #f59e0b);
           border: 1px solid rgba(245, 158, 11, 0.25);
         }
+        .mc-config-fields {
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .mc-config-field {
+          display: flex;
+          flex-direction: column;
+          gap: 0.15rem;
+        }
+        .mc-config-label {
+          font-size: 0.75rem;
+          color: var(--color-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .mc-config-input {
+          padding: 0.4rem 0.6rem;
+          border: 1px solid var(--color-border, rgba(255,255,255,0.08));
+          border-radius: var(--radius-sm, 0.25rem);
+          background: var(--color-card, rgba(255,255,255,0.04));
+          color: var(--color-text);
+          font-size: 0.8rem;
+          font-family: var(--font-mono, monospace);
+        }
+        .mc-config-input:focus {
+          outline: none;
+          border-color: var(--color-accent, #6366f1);
+        }
+        .mc-config-actions {
+          margin-top: 0.75rem;
+          display: flex;
+          align-items: center;
+        }
+        .mc-btn {
+          padding: 0.4rem 0.8rem;
+          border: 1px solid var(--color-border, rgba(255,255,255,0.08));
+          border-radius: var(--radius-sm, 0.25rem);
+          font-size: 0.8rem;
+          cursor: pointer;
+          transition: opacity 0.2s;
+        }
+        .mc-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .mc-btn-save {
+          background: rgba(99, 102, 241, 0.15);
+          color: var(--color-accent, #6366f1);
+          border-color: rgba(99, 102, 241, 0.3);
+        }
+        .mc-btn-save:hover:not(:disabled) {
+          background: rgba(99, 102, 241, 0.25);
+        }
+        .mc-btn-restart {
+          background: rgba(239, 68, 68, 0.12);
+          color: var(--color-danger, #ef4444);
+          border-color: rgba(239, 68, 68, 0.25);
+        }
+        .mc-btn-restart:hover:not(:disabled) {
+          background: rgba(239, 68, 68, 0.2);
+        }
+        .mc-config-msg {
+          margin-top: 0.5rem;
+          font-size: 0.8rem;
+        }
       `),
 
       // ── Connection card ────────────────────────────────────────────
@@ -349,7 +415,126 @@
             )
           )
         );
-      })()
+      })(),
+
+      // ── Configuration card ──────────────────────────────────────────
+      React.createElement(ConfigCard, {})
+    );
+  }
+
+  // ── ConfigCard sub-component ────────────────────────────────────────
+  function ConfigCard() {
+    var _React = React;
+    var useState = _React.useState;
+    var useEffect = _React.useEffect;
+
+    var _a = useState(null), config = _a[0], setConfig = _a[1];
+    var _b = useState({}), edits = _b[0], setEdits = _b[1];
+    var _c = useState(false), saving = _c[0], setSaving = _c[1];
+    var _d = useState(false), restarting = _d[0], setRestarting = _d[1];
+    var _e = useState(null), saveMsg = _e[0], setSaveMsg = _e[1];
+
+    useEffect(function () {
+      api("/config")
+        .then(function (d) { setConfig(d); })
+        .catch(function () {});
+    }, []);
+
+    if (!config) return null;
+    if (config.error) return null;
+
+    var fields = [
+      { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
+      { key: "admin_channels", label: "Admin Channels", hint: "channel indices, comma-separated" },
+      { key: "monitor_channels", label: "Monitor Channels", hint: "channels to listen on" },
+      { key: "require_mention_channels", label: "Mention-Gated Channels", hint: "require @mention, comma-separated" },
+      { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
+      { key: "allow_all_users", label: "Allow All Users", hint: "true/false" },
+      { key: "enable_dms", label: "Enable DMs", hint: "true/false" },
+    ];
+
+    function handleChange(key, value) {
+      var next = {};
+      for (var k in edits) { next[k] = edits[k]; }
+      next[key] = value;
+      setEdits(next);
+    }
+
+    function handleSave() {
+      var changed = {};
+      var hasChanges = false;
+      for (var k in edits) {
+        if (edits[k] !== config[k]) {
+          changed[k] = edits[k];
+          hasChanges = true;
+        }
+      }
+      if (!hasChanges) { setSaveMsg("No changes to save"); return; }
+      setSaving(true);
+      setSaveMsg(null);
+      api("/config", { method: "POST", body: JSON.stringify(changed) })
+        .then(function (d) {
+          setConfig(d.config);
+          setEdits({});
+          setSaving(false);
+          setSaveMsg("✅ Saved — restart gateway to apply");
+        })
+        .catch(function (e) {
+          setSaving(false);
+          setSaveMsg("❌ Save failed: " + String(e));
+        });
+    }
+
+    function handleRestart() {
+      setRestarting(true);
+      setSaveMsg(null);
+      api("/restart", { method: "POST" })
+        .then(function (d) {
+          setRestarting(false);
+          setSaveMsg(d.success ? "✅ Gateway restarting…" : "❌ Restart failed: " + (d.error || d.stderr));
+        })
+        .catch(function (e) {
+          setRestarting(false);
+          setSaveMsg("❌ Restart failed: " + String(e));
+        });
+    }
+
+    return React.createElement(C.Card, null,
+      React.createElement(C.CardContent, null,
+        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "⚙️ Configuration"),
+        React.createElement("div", { className: "mc-config-fields" },
+          fields.map(function (f) {
+            var val = edits.hasOwnProperty(f.key) ? edits[f.key] : (config[f.key] || "");
+            return React.createElement("div", { key: f.key, className: "mc-config-field" },
+              React.createElement("label", { className: "mc-config-label" }, f.label),
+              React.createElement("input", {
+                className: "mc-config-input",
+                type: "text",
+                value: val,
+                onChange: function (e) { handleChange(f.key, e.target.value); },
+                placeholder: f.hint,
+              })
+            );
+          })
+        ),
+        React.createElement("div", { className: "mc-config-actions" },
+          React.createElement("button", {
+            className: "mc-btn mc-btn-save",
+            onClick: handleSave,
+            disabled: saving,
+          }, saving ? "Saving…" : "💾 Save Config"),
+          React.createElement("button", {
+            className: "mc-btn mc-btn-restart",
+            onClick: handleRestart,
+            disabled: restarting,
+            style: { marginLeft: "0.5rem" },
+          }, restarting ? "Restarting…" : "🔄 Restart Gateway")
+        ),
+        saveMsg && React.createElement("div", {
+          className: "mc-config-msg",
+          style: { color: saveMsg.indexOf("✅") === 0 ? "var(--color-success, #22c55e)" : "var(--color-danger, #ef4444)" },
+        }, saveMsg)
+      )
     );
   }
 
