@@ -1730,6 +1730,67 @@ async def _handle_meshcore_admin(node: str, command: str, password: str = "") ->
     return json.dumps(result)
 
 
+async def _handle_meshcore_admin_query(node: str, command: str, password: str = "") -> str:
+    """Handler for meshcore_admin_query tool. Uses the file-based request/response
+    mechanism — writes a request file that the gateway's keepalive loop picks up,
+    then polls for the response. Works from any session, not just the gateway process."""
+    import os, json, time
+
+    REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
+    RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
+
+    # Check if a request is already pending
+    if os.path.exists(REQUEST_FILE):
+        return json.dumps({"success": False, "error": "An admin query is already in progress — wait and retry"})
+
+    # Check gateway is running (state file exists and is fresh)
+    STATE_FILE = "/tmp/hermes-meshcore-state.json"
+    if not os.path.exists(STATE_FILE):
+        return json.dumps({"success": False, "error": "MeshCore gateway not running (no state file)"})
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+        if time.time() - state.get("updated_at", 0) > 60:
+            return json.dumps({"success": False, "error": "MeshCore gateway state is stale — gateway may be down"})
+    except Exception:
+        return json.dumps({"success": False, "error": "Cannot read gateway state"})
+
+    # Write request
+    request_id = str(int(time.time()))
+    request = {
+        "request_id": request_id,
+        "node": node,
+        "command": command,
+        "password": password,
+        "submitted_at": time.time(),
+    }
+    with open(REQUEST_FILE, "w") as f:
+        json.dump(request, f)
+
+    # Poll for response (up to 60s)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        await asyncio.sleep(3)
+        if not os.path.exists(RESPONSE_FILE):
+            continue
+        try:
+            with open(RESPONSE_FILE) as f:
+                result = json.load(f)
+            if result.get("request_id") == request_id:
+                os.remove(RESPONSE_FILE)
+                return json.dumps(result)
+        except Exception:
+            continue
+
+    # Timeout — clean up
+    if os.path.exists(REQUEST_FILE):
+        try:
+            os.remove(REQUEST_FILE)
+        except Exception:
+            pass
+    return json.dumps({"success": False, "error": "Timed out waiting for response (60s) — node may be unreachable"})
+
+
 async def _handle_meshcore_contact(name: str) -> str:
     """Handler for meshcore_contact tool. Requires the gateway adapter to be
     connected — reads from the gateway's contact cache."""
@@ -1850,4 +1911,44 @@ def register(ctx):
             name=args.get("name", "")),
         is_async=True,
         emoji="📇",
+    )
+    ctx.register_tool(
+        name="meshcore_admin_query",
+        toolset="meshcore",
+        schema={
+            "name": "meshcore_admin_query",
+            "description": (
+                "Query a remote MeshCore repeater via the gateway's file-based request mechanism. "
+                "Works from any session — writes a request file, gateway processes it within 15s, "
+                "then polls for the response (up to 60s). Use this instead of meshcore_admin when "
+                "the gateway process is separate from your session. "
+                "Supported commands: ver, stats-core, stats-radio, stats-packets, get name, "
+                "get lat, get lon, get role, get repeat, get guest.password, get owner.info, "
+                "neighbors, clock. Use 'all' to run all read-only commands at once."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node": {
+                        "type": "string",
+                        "description": "Node name or pubkey prefix to query (e.g. 'SA-MtCompass-RPT', 'ab60ca209921')"
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "CLI command to send (e.g. 'stats-core', 'ver', 'neighbors', 'all')"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Optional admin password for the repeater"
+                    },
+                },
+                "required": ["node", "command"],
+            },
+        },
+        handler=lambda args, **kw: _handle_meshcore_admin_query(
+            node=args.get("node", ""),
+            command=args.get("command", ""),
+            password=args.get("password", "")),
+        is_async=True,
+        emoji="🛰️",
     )
