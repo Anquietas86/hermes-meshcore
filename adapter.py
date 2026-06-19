@@ -933,7 +933,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             request_id = req.get("request_id", "")
 
             logger.info("MeshCore: processing admin request %s: %s → %s", request_id, node, command)
-            result = await self.query_remote_repeater(node, command, password=password, timeout=30.0)
+            result = await self.query_remote_repeater(node, command, password=password, timeout=60.0)
             result["request_id"] = request_id
             result["completed_at"] = time.time()
 
@@ -1705,7 +1705,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         return f"[BINARY tag={tag}] {response_data.hex()}"
 
     async def query_remote_repeater(self, name: str, command: str,
-                                     timeout: float = 30.0,
+                                     timeout: float = 60.0,
                                      password: str = "") -> Dict[str, Any]:
         """Send a command to a remote repeater using the MeshCore binary protocol.
 
