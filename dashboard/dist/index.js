@@ -267,6 +267,15 @@
         .mc-btn-save:hover:not(:disabled) {
           background: rgba(99, 102, 241, 0.25);
         }
+        .mc-btn-load {
+          background: rgba(255,255,255,0.04);
+          color: var(--color-muted);
+          border-color: var(--color-border, rgba(255,255,255,0.08));
+        }
+        .mc-btn-load:hover {
+          background: rgba(255,255,255,0.08);
+          color: var(--color-text);
+        }
         .mc-btn-restart {
           background: rgba(239, 68, 68, 0.12);
           color: var(--color-danger, #ef4444);
@@ -565,6 +574,37 @@
         });
     }
 
+    function handleLoad() {
+      api("/config")
+        .then(function (d) {
+          setConfig(d);
+          setEdits({});
+          setSaveMsg("✅ Loaded current settings");
+          // Reset channel checkboxes
+          var checks = {};
+          var adminChs = parseCsv(d.admin_channels || "");
+          var monitorChs = parseCsv(d.monitor_channels || "");
+          var mentionChs = parseCsv(d.require_mention_channels || "");
+          channels.forEach(function (ch) {
+            var chStr = String(ch);
+            checks[chStr] = {
+              monitor: monitorChs.indexOf(chStr) !== -1,
+              admin: adminChs.indexOf(chStr) !== -1,
+              mention: mentionChs.indexOf(chStr) !== -1,
+            };
+          });
+          setChChecks(checks);
+          // Reset boolean toggles
+          setBoolToggles({
+            allow_all_users: String(d.allow_all_users || "").toLowerCase() === "true",
+            enable_dms: String(d.enable_dms || "").toLowerCase() === "true",
+          });
+        })
+        .catch(function (e) {
+          setSaveMsg("❌ Load failed: " + String(e));
+        });
+    }
+
     var textFields = [
       { key: "admin_nodes", label: "Admin Nodes", hint: "pubkey prefixes, comma-separated" },
       { key: "allowed_users", label: "Allowed Users", hint: "whitelisted pubkey prefixes" },
@@ -659,9 +699,14 @@
 
         React.createElement("div", { className: "mc-config-actions" },
           React.createElement("button", {
+            className: "mc-btn mc-btn-load",
+            onClick: handleLoad,
+          }, "📋 Load Current"),
+          React.createElement("button", {
             className: "mc-btn mc-btn-save",
             onClick: handleSave,
             disabled: saving,
+            style: { marginLeft: "0.5rem" },
           }, saving ? "Saving…" : "💾 Save Config"),
           React.createElement("button", {
             className: "mc-btn mc-btn-restart",
