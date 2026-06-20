@@ -29,10 +29,16 @@ def _detect_profile() -> str:
     return "default"
 
 def _config_path() -> str:
-    return os.path.expanduser(f"~/.hermes/profiles/{_detect_profile()}/config.yaml")
+    profile = _detect_profile()
+    if profile == "default":
+        return os.path.expanduser("~/.hermes/config.yaml")
+    return os.path.expanduser(f"~/.hermes/profiles/{profile}/config.yaml")
 
 def _env_path() -> str:
-    return os.path.expanduser(f"~/.hermes/profiles/{_detect_profile()}/.env")
+    profile = _detect_profile()
+    if profile == "default":
+        return os.path.expanduser("~/.hermes/.env")
+    return os.path.expanduser(f"~/.hermes/profiles/{profile}/.env")
 
 # ── Config keys we expose for editing ──────────────────────────────────────
 CONFIG_KEYS = [
