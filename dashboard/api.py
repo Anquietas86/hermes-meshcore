@@ -129,7 +129,7 @@ def _write_config(updates: dict) -> dict:
         for key in CONFIG_KEYS:
             if key in updates:
                 extra[key] = str(updates[key])
-        with open(CONFIG_PATH, "w") as f:
+        with open(_config_path(), "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
         # Write to .env (what the gateway actually reads)
