@@ -142,8 +142,8 @@
           font-size: 0.85rem;
         }
         .mc-stat-row:last-child { border-bottom: none; }
-        .mc-stat-label { color: var(--color-muted); }
-        .mc-stat-value { font-weight: 500; }
+        .mc-stat-label { color: var(--color-text); font-weight: 500; }
+        .mc-stat-value { font-weight: 600; }
         .mc-conn-badge {
           display: inline-block;
           padding: 0.2rem 0.6rem;
@@ -184,7 +184,8 @@
         .mc-channel-badge {
           font-family: var(--font-mono, monospace);
           font-size: 0.75rem;
-          color: var(--color-muted);
+          color: var(--color-text);
+          opacity: 0.7;
         }
         .mc-tag-list {
           display: flex;
@@ -224,8 +225,9 @@
           gap: 0.15rem;
         }
         .mc-config-label {
-          font-size: 0.75rem;
-          color: var(--color-muted);
+          font-size: 0.78rem;
+          color: var(--color-text);
+          font-weight: 600;
           text-transform: uppercase;
           letter-spacing: 0.04em;
         }
@@ -268,16 +270,17 @@
           cursor: not-allowed;
         }
         .mc-btn-save {
-          background: rgba(99, 102, 241, 0.15);
-          color: var(--color-accent, #6366f1);
-          border-color: rgba(99, 102, 241, 0.3);
+          background: rgba(99, 102, 241, 0.2);
+          color: #c7d2fe;
+          border-color: rgba(99, 102, 241, 0.35);
         }
         .mc-btn-save:hover:not(:disabled) {
-          background: rgba(99, 102, 241, 0.25);
+          background: rgba(99, 102, 241, 0.3);
+          color: #e0e7ff;
         }
         .mc-btn-load {
           background: rgba(255,255,255,0.04);
-          color: var(--color-muted);
+          color: var(--color-text);
           border-color: var(--color-border, rgba(255,255,255,0.08));
         }
         .mc-btn-load:hover {
@@ -285,12 +288,13 @@
           color: var(--color-text);
         }
         .mc-btn-restart {
-          background: rgba(239, 68, 68, 0.12);
-          color: var(--color-danger, #ef4444);
-          border-color: rgba(239, 68, 68, 0.25);
+          background: rgba(239, 68, 68, 0.18);
+          color: #fecaca;
+          border-color: rgba(239, 68, 68, 0.3);
         }
         .mc-btn-restart:hover:not(:disabled) {
-          background: rgba(239, 68, 68, 0.2);
+          background: rgba(239, 68, 68, 0.28);
+          color: #fee2e2;
         }
         .mc-config-msg {
           margin-top: 0.5rem;
@@ -312,8 +316,9 @@
         }
         .mc-ch-row:last-child { border-bottom: none; }
         .mc-ch-header {
-          font-size: 0.7rem;
-          color: var(--color-muted);
+          font-size: 0.75rem;
+          color: var(--color-text);
+          font-weight: 600;
           text-transform: uppercase;
           letter-spacing: 0.04em;
           border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
@@ -387,10 +392,10 @@
       // ── Connection & Contacts card (merged) ──────────────────────────
       React.createElement(C.Card, null,
         React.createElement(C.CardContent, null,
-          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "📡 Connection & Contacts"),
+          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text)" } }, "📡 Connection & Contacts"),
           // Connection section
           React.createElement("div", { style: { marginBottom: "0.5rem" } },
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Gateway"),
+            React.createElement("div", { style: { fontSize: "0.78rem", color: "var(--color-text)", fontWeight: "600", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Gateway"),
             React.createElement("div", { className: "mc-conn-badge", style: { background: connColor + "20", color: connColor } }, connLabel),
             React.createElement(StatRow, { label: "Host", value: escapeHtml(data.host) + ":" + (data.port || "—"), mono: true }),
             React.createElement(StatRow, { label: "Last Message", value: formatTime(data.last_message_time), mono: true }),
@@ -398,7 +403,7 @@
           ),
           // Contacts section
           React.createElement("div", { style: { marginBottom: "0.5rem" } },
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Contacts (" + (contacts.total || 0) + ")"),
+            React.createElement("div", { style: { fontSize: "0.78rem", color: "var(--color-text)", fontWeight: "600", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Contacts (" + (contacts.total || 0) + ")"),
             React.createElement("div", { className: "mc-contacts-summary" },
               React.createElement("div", { className: "mc-contact-chip" }, "🔁 ", React.createElement("strong", null, contacts.repeaters || 0), " repeaters"),
               React.createElement("div", { className: "mc-contact-chip" }, "📱 ", React.createElement("strong", null, contacts.clients || 0), " clients"),
@@ -407,7 +412,7 @@
           ),
           // Channels section
           data.channels && data.channels.length > 0 && React.createElement("div", null,
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Channels (" + data.channels.length + ")"),
+            React.createElement("div", { style: { fontSize: "0.78rem", color: "var(--color-text)", fontWeight: "600", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Channels (" + data.channels.length + ")"),
             React.createElement("div", { className: "mc-channel-list" },
               data.channels.map(function (ch) {
                 var names = data.channel_names || {};
@@ -425,10 +430,10 @@
       // ── Node & Telemetry card ────────────────────────────────────────
       React.createElement(C.Card, null,
         React.createElement(C.CardContent, null,
-          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🖥️ Node & Telemetry"),
+          React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text)" } }, "🖥️ Node & Telemetry"),
           // Node section
           React.createElement("div", { style: { marginBottom: "0.5rem" } },
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Node Info"),
+            React.createElement("div", { style: { fontSize: "0.78rem", color: "var(--color-text)", fontWeight: "600", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Node Info"),
             React.createElement(StatRow, { label: "Name", value: escapeHtml(node.name || "unknown") }),
             React.createElement(StatRow, { label: "Pubkey", value: escapeHtml(node.pubkey_prefix || "—") + "…", mono: true }),
             node.lat != null && React.createElement(StatRow, { label: "Location", value: node.lat.toFixed(4) + ", " + node.lon.toFixed(4), mono: true }),
@@ -440,7 +445,7 @@
           ),
           // Telemetry section
           React.createElement("div", null,
-            React.createElement("div", { style: { fontSize: "0.75rem", color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Telemetry"),
+            React.createElement("div", { style: { fontSize: "0.78rem", color: "var(--color-text)", fontWeight: "600", letterSpacing: "0.04em", marginBottom: "0.25rem" } }, "Telemetry"),
             stats.battery_mv != null && (function () {
               const pct = batteryPct(stats.battery_mv);
               const batColor = pct > 50 ? "var(--color-success, #22c55e)" : pct > 20 ? "var(--color-warning, #f59e0b)" : "var(--color-danger, #ef4444)";
@@ -555,7 +560,7 @@
 
     return React.createElement(C.Card, null,
       React.createElement(C.CardContent, null,
-        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "🔧 Remote Repeater Admin"),
+        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text)" } }, "🔧 Remote Repeater Admin"),
         React.createElement("div", { className: "mc-admin-row" },
           React.createElement("select", {
             className: "mc-config-input mc-select",
@@ -806,7 +811,7 @@
 
     return React.createElement(C.Card, null,
       React.createElement(C.CardContent, null,
-        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.9rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)" } }, "⚙️ Configuration"),
+        React.createElement("h3", { style: { margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text)" } }, "⚙️ Configuration"),
 
         // ── Channel checkbox matrix ──────────────────────────────────
         channels.length > 0 && React.createElement("div", { style: { marginBottom: "0.75rem" } },
