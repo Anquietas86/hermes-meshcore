@@ -47,6 +47,79 @@ The plugin includes a live dashboard tab at `/meshcore` showing:
 
 Data refreshes every 5 seconds from a shared state file written by the gateway adapter — no second TCP connection to the node required.
 
+### Dashboard backend trust required on current Hermes
+
+Recent Hermes dashboard security hardening blocks Python backend APIs from
+non-bundled dashboard plugins by default. This is intentional: importing a
+user/project plugin's `dashboard/api.py` is arbitrary Python code execution.
+
+MeshCore's dashboard needs its backend API (`dashboard/api.py`) for status,
+configuration, contacts, nodes, health, and remote repeater admin. Therefore the
+operator must explicitly trust this plugin's dashboard API.
+
+Add `meshcore-platform` to `dashboard.trusted_plugin_apis` in `~/.hermes/config.yaml`:
+
+```yaml
+dashboard:
+  trusted_plugin_apis:
+    - meshcore-platform
+```
+
+If you already have trusted dashboard plugins, append `meshcore-platform` rather
+than replacing the list.
+
+Safe append command:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import yaml
+p = Path.home() / '.hermes' / 'config.yaml'
+cfg = yaml.safe_load(p.read_text()) or {}
+dashboard = cfg.setdefault('dashboard', {})
+trusted = dashboard.get('trusted_plugin_apis')
+if trusted is None:
+    trusted = []
+elif isinstance(trusted, str):
+    trusted = [x for x in trusted.replace(',', ' ').split() if x]
+elif not isinstance(trusted, list):
+    trusted = []
+if 'meshcore-platform' not in trusted:
+    trusted.append('meshcore-platform')
+dashboard['trusted_plugin_apis'] = trusted
+p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+print('dashboard.trusted_plugin_apis =', trusted)
+PY
+```
+
+Then restart the dashboard:
+
+```bash
+systemctl --user restart hermes-dashboard.service
+# or, if running manually:
+hermes dashboard --stop
+hermes dashboard --host 0.0.0.0 --port 9119 --insecure --no-open
+```
+
+Expected verification:
+
+```bash
+curl -s http://127.0.0.1:9119/api/dashboard/plugins \
+  | jq '.[] | select(.name=="meshcore-platform") | {name, source, has_api}'
+```
+
+Expected result:
+
+```json
+{"name":"meshcore-platform","source":"user","has_api":true}
+```
+
+If `has_api` is `false`, the dashboard tab will show errors such as:
+
+```text
+404: {"detail":"No such API endpoint: /api/plugins/meshcore-platform/status"}
+```
+
 ## Quick Install
 
 ```bash
@@ -54,6 +127,11 @@ hermes plugins install Anquietas86/hermes-meshcore
 ```
 
 Or from the dashboard: Plugins → Install → enter `Anquietas86/hermes-meshcore`.
+
+> **Note:** The plugin installer can display post-install instructions, but it
+> does not silently grant dashboard backend API trust. The manual trust step
+> above is required because it changes the dashboard Python-import security
+> boundary.
 
 ## Configuration
 
