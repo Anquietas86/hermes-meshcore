@@ -601,7 +601,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     # ── Connection lifecycle ──────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.host:
             logger.error("MeshCore: MESHCORE_HOST must be configured")
             self._set_fatal_error("config_missing", "MESHCORE_HOST must be set", retryable=False)
