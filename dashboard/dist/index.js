@@ -80,6 +80,8 @@
   function MeshCorePage() {
     const [data, setData] = React.useState(null);
     const [error, setError] = React.useState(null);
+    const [advertMsg, setAdvertMsg] = React.useState(null);
+    const [advertLoading, setAdvertLoading] = React.useState(false);
 
     React.useEffect(function () {
       let active = true;
@@ -93,6 +95,14 @@
       const interval = setInterval(poll, 5000);
       return function () { active = false; clearInterval(interval); };
     }, []);
+
+    function handleAdvert() {
+      setAdvertLoading(true);
+      setAdvertMsg(null);
+      api("/advert", { method: "POST" })
+        .then(function (r) { setAdvertMsg(r.message || "Advert sent"); setAdvertLoading(false); })
+        .catch(function (e) { setAdvertMsg("Error: " + String(e)); setAdvertLoading(false); });
+    }
 
     // ── Error state ───────────────────────────────────────────────────
     if (error && !data) {
@@ -399,7 +409,17 @@
             React.createElement("div", { className: "mc-conn-badge", style: { background: connColor + "20", color: connColor } }, connLabel),
             React.createElement(StatRow, { label: "Host", value: escapeHtml(data.host) + ":" + (data.port || "—"), mono: true }),
             React.createElement(StatRow, { label: "Last Message", value: formatTime(data.last_message_time), mono: true }),
-            React.createElement(StatRow, { label: "DMs", value: data.dms_enabled ? "✅ Enabled" : "❌ Disabled" })
+            React.createElement(StatRow, { label: "DMs", value: data.dms_enabled ? "✅ Enabled" : "❌ Disabled" }),
+            // Advert button
+            React.createElement("div", { style: { marginTop: "0.5rem" } },
+              React.createElement("button", {
+                className: "mc-btn mc-btn-load",
+                onClick: handleAdvert,
+                disabled: advertLoading,
+                style: { fontSize: "0.78rem" }
+              }, advertLoading ? "⏳ Sending…" : "📢 Send Flood Advert"),
+              advertMsg && React.createElement("span", { style: { marginLeft: "0.5rem", fontSize: "0.75rem", color: "var(--color-text)", opacity: 0.7 } }, advertMsg)
+            )
           ),
           // Contacts section
           React.createElement("div", { style: { marginBottom: "0.5rem" } },

@@ -890,6 +890,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 self._write_state_file()
                 # Check for pending admin requests from dashboard
                 await self._process_admin_request()
+                # Check for pending advert requests from dashboard
+                await self._process_advert_request()
             except Exception as e:
                 failures += 1
                 logger.warning("MeshCore: keepalive failed (%d): %s", failures, e)
@@ -961,6 +963,20 @@ class MeshCoreAdapter(BasePlatformAdapter):
                         "success" if result.get("success") else "failed")
         except Exception as e:
             logger.warning("MeshCore: admin request processing failed: %s", e)
+
+    async def _process_advert_request(self):
+        """Check for a pending advert request file from the dashboard and
+        send a flood advert on the local node."""
+        ADVERT_REQ = "/tmp/hermes-meshcore-advert-request.json"
+        try:
+            if not os.path.exists(ADVERT_REQ):
+                return
+            os.remove(ADVERT_REQ)
+            logger.info("MeshCore: processing advert request from dashboard")
+            await self._conn.send_command(b"\x07\x01", [PKT_OK, PKT_ERROR])
+            logger.info("MeshCore: sent flood advert (dashboard trigger)")
+        except Exception as e:
+            logger.warning("MeshCore: advert request failed: %s", e)
 
     def _build_node_info(self) -> dict:
         si = self._self_info or {}

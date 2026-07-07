@@ -318,3 +318,22 @@ async def get_admin_result(request_id: str = ""):
     # Clean up response file after reading
     os.remove(ADMIN_RESPONSE_FILE)
     return JSONResponse({"status": "complete", "result": result})
+
+
+# ── Advert trigger ──────────────────────────────────────────────────────────
+
+ADVERT_REQUEST_FILE = "/tmp/hermes-meshcore-advert-request.json"
+
+
+@router.post("/advert")
+async def trigger_advert():
+    """Trigger a flood advert on the local node. The gateway's keepalive
+    loop picks it up within 15s and sends the advert command."""
+    if os.path.exists(ADVERT_REQUEST_FILE):
+        raise HTTPException(status_code=409, detail="An advert request is already pending")
+
+    req_data = {"action": "advert", "submitted_at": time.time()}
+    with open(ADVERT_REQUEST_FILE, "w") as f:
+        json.dump(req_data, f)
+
+    return JSONResponse({"success": True, "message": "Advert request submitted — gateway will process within 15s"})
