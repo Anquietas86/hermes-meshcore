@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import os
+import socket
 import struct
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -146,6 +147,20 @@ class MeshCoreRawConnection:
 
     async def connect(self) -> None:
         self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        # Enable TCP keepalive to prevent idle disconnects from pyMC
+        sock = self.writer.get_extra_info('socket')
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                # Linux: TCP_KEEPIDLE=30s, TCP_KEEPINTVL=10s, TCP_KEEPCNT=3
+                if hasattr(socket, 'TCP_KEEPIDLE'):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                if hasattr(socket, 'TCP_KEEPINTVL'):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                if hasattr(socket, 'TCP_KEEPCNT'):
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except Exception:
+                pass  # Non-Linux or permission issue — best effort
         logger.info("MeshCore(raw): connected to %s:%s", self.host, self.port)
 
     async def disconnect(self) -> None:
@@ -648,12 +663,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("MeshCore: contacts failed: %s", e)
 
-        # Send flood advert
-        try:
-            await self._conn.send_command(b"\x07\x01", [PKT_OK, PKT_ERROR])
-            logger.info("MeshCore: sent flood advert")
-        except Exception:
-            pass
+        # Send flood advert — only on initial connect, not reconnect
+        if not is_reconnect:
+            try:
+                await self._conn.send_command(b"\x07\x01", [PKT_OK, PKT_ERROR])
+                logger.info("MeshCore: sent flood advert")
+            except Exception:
+                pass
+        else:
+            logger.info("MeshCore: reconnect — skipping flood advert")
 
         # Load channel secrets
         try:
@@ -1042,7 +1060,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             self._conn = None
         self._contacts.clear()
         try:
-            await self.connect()
+            await self.connect(is_reconnect=True)
         except Exception as e:
             logger.error("MeshCore: reconnect error: %s", e)
 
