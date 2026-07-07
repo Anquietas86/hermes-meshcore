@@ -1453,8 +1453,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         platform_context = (
             f"PLATFORM CONTEXT — MeshCore LoRa mesh: {char_limit} char packets, "
             "auto-split for longer responses. Plain text only, no markdown. "
-            "Be concise but COMPLETE — answer the question fully, just use fewer words. "
-            "Longer answers are fine; they auto-split into multiple packets. "
+            "CRITICAL: Keep responses SHORT — aim for 1-3 sentences max. "
+            "Be terse and direct. Only expand if the question genuinely requires detail. "
             "Messages are prefixed with [sender name] — address the sender by that name. "
             + security_note
         )
