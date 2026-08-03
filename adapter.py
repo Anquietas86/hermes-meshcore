@@ -1276,15 +1276,68 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _split_for_mesh(text: str, max_len: int = 150) -> list:
+        """Split text into chunks that fit within max_len BYTES when UTF-8 encoded.
+
+        The MeshCore firmware limit is in bytes, not characters. Multi-byte
+        Unicode characters (em dashes, curly quotes, ellipsis, etc.) can push
+        a "150-char" string to 200+ bytes, causing firmware truncation mid-
+        character and garbled symbols at the end of messages.
+        """
         chunks = []
-        while len(text) > max_len:
-            split_at = text.rfind(" ", 0, max_len)
-            if split_at == -1:
-                split_at = max_len
-            chunks.append(text[:split_at].strip())
-            text = text[split_at:].strip()
-        if text:
-            chunks.append(text)
+        while text:
+            encoded = text.encode("utf-8")
+            if len(encoded) <= max_len:
+                chunks.append(text)
+                break
+
+            # Walk back from max_len to find a safe UTF-8 boundary:
+            # 1. Skip continuation bytes (0x80-0xBF)
+            # 2. Check if the start byte's full character fits
+            byte_limit = max_len
+            while byte_limit > 0:
+                b = encoded[byte_limit - 1]
+                if (b & 0xC0) == 0x80:
+                    # Continuation byte — walk back
+                    byte_limit -= 1
+                    continue
+                # Found a start byte. Check if the full character fits.
+                if (b & 0x80) == 0:
+                    char_len = 1
+                elif (b & 0xE0) == 0xC0:
+                    char_len = 2
+                elif (b & 0xF0) == 0xE0:
+                    char_len = 3
+                elif (b & 0xF8) == 0xF0:
+                    char_len = 4
+                else:
+                    char_len = 1  # invalid, treat as single byte
+                if byte_limit - 1 + char_len <= max_len:
+                    break  # character fits
+                # Character doesn't fit — walk back past it
+                byte_limit -= 1
+
+            if byte_limit == 0:
+                byte_limit = max_len  # fallback: single char won't fit
+
+            # Decode the safe prefix
+            safe_prefix = encoded[:byte_limit].decode("utf-8")
+
+            # Try to split on a space within the safe prefix
+            split_at = safe_prefix.rfind(" ")
+            if split_at > 0:
+                chunk = safe_prefix[:split_at].strip()
+                text = text[split_at:].strip()
+            else:
+                # No space found — take the whole safe prefix
+                chunk = safe_prefix.strip()
+                text = text[len(safe_prefix):].strip()
+
+            if chunk:
+                chunks.append(chunk)
+            else:
+                # Edge case: couldn't extract anything useful
+                break
+
         return chunks or [""]
 
     async def send_typing(self, chat_id, metadata=None):
