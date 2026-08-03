@@ -1139,9 +1139,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
         if not self._conn or not self._conn.is_connected:
             return SendResult(success=False, error="Not connected")
 
-        # Different limits: DMs = 150, channels = 135
+        # Different limits: DMs = 150, channels = 135 — but we use 130
+        # for both to stay safely under firmware byte limits, matching the
+        # HA automation chunking strategy that works reliably.
         is_channel = chat_id.startswith("channel:")
-        max_len = 135 if is_channel else 150
+        max_len = 130  # unified: safe for both DMs and channels
         marker_len = max_len - 13  # reserve 13 chars for " ... (N/M)"
 
         raw_chunks = self._split_for_mesh(content, max_len=max_len)
@@ -1204,6 +1206,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         a corrupted/overlapping transmission, producing garbled text.
         Returns True on success, error string on failure (message may have
         been delivered despite the error)."""
+        # Sanitize: strip null bytes and control chars that firmware may
+        # interpret as terminators/delimiters, causing mid-message truncation.
+        text = self._sanitize_text(text)
         timestamp = int(time.time())
         cmd = bytes([CMD_SEND_CHANNEL_TXT_MSG, 0x00, channel_idx]) + \
               timestamp.to_bytes(4, "little") + text.encode("utf-8")
@@ -1230,6 +1235,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         and would block the command lock, preventing message reception.
         Fire-and-forget, same as meshcore_py's send_msg().
         """
+        # Sanitize: strip null bytes and control chars that firmware may
+        # interpret as terminators/delimiters, causing mid-message truncation.
+        text = self._sanitize_text(text)
         contact = self._contacts.get(pubkey_prefix)
         if contact is None:
             prefix_lower = pubkey_prefix.lower()
@@ -1273,6 +1281,24 @@ class MeshCoreAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("MeshCore: self advert exception: %s", e)
             return False
+
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        """Strip characters that MeshCore firmware may interpret as
+        terminators or delimiters, causing mid-message truncation.
+
+        - Null bytes (\\x00): C-string terminator — firmware stops reading
+        - Other control chars (\\x00-\\x1F except \\n, \\r, \\t): may confuse parser
+        - Unicode replacement char (U+FFFD): indicates prior encoding damage
+        """
+        # Remove null bytes (most common cause of short-message truncation)
+        text = text.replace("\x00", "")
+        # Remove other control characters except newline, carriage return, tab
+        import re
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+        # Strip Unicode replacement character (indicates prior encoding damage)
+        text = text.replace("\ufffd", "")
+        return text
 
     @staticmethod
     def _split_for_mesh(text: str, max_len: int = 150) -> list:
@@ -1501,8 +1527,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     "do NOT probe memory for the profile user's identity. "
                 )
 
-        # Different limits: DMs = 150 chars, channels = 135 chars
-        char_limit = 135 if chat_type == "group" else 150
+        # Unified 130-char limit for both DMs and channels — matches the
+        # HA automation chunking strategy that works reliably.
+        char_limit = 130
         platform_context = (
             f"PLATFORM CONTEXT — MeshCore LoRa mesh: {char_limit} char packets, "
             "auto-split for longer responses. Plain text only, no markdown. "
@@ -2293,7 +2320,7 @@ def register(ctx):
         allow_all_env="MESHCORE_ALLOW_ALL_USERS",
         max_message_length=400, emoji="📡", pii_safe=True, allow_update_command=True,
         platform_hint=(
-            "MeshCore LoRa mesh: 150 char DMs, 135 char channels, auto-split for longer. "
+            "MeshCore LoRa mesh: 130 char packets (DMs & channels), auto-split for longer. "
             "Plain text only. Admin nodes get full access; public users restricted. "
             "Never share credentials or sensitive data in public channels."
         ),
