@@ -146,7 +146,9 @@ class MeshCoreRawConnection:
         self._recv_buffer = b""
 
     async def connect(self) -> None:
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        self.reader, self.writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), timeout=15.0
+        )
         # Enable TCP keepalive to prevent idle disconnects from pyMC
         sock = self.writer.get_extra_info('socket')
         if sock is not None:
