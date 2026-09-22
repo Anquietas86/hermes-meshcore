@@ -1,0 +1,39 @@
+name: MeshCore plugin checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: meshcore-platform
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes-agent
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test runtime dependencies
+        run: python -m pip install --disable-pip-version-check pyyaml fastapi
+      - name: Run focused security tests
+        working-directory: meshcore-platform
+        env:
+          HERMES_SOURCE_ROOT: ${{ github.workspace }}/hermes-agent
+          HERMES_PYTHON: python
+          HERMES_PROFILE_DIR: ${{ runner.temp }}/hermes-profile
+        run: ./run_tests.sh
+      - name: Compile Python sources
+        working-directory: meshcore-platform
+        env:
+          PYTHONPATH: ${{ github.workspace }}/meshcore-platform:${{ github.workspace }}/hermes-agent
+        run: python -m compileall -q .
+      - name: Check whitespace and tracked bytecode
+        working-directory: meshcore-platform
+        run: |
+          git diff --check
+          test -z "$(git ls-files '*.pyc' '*__pycache__*')"
