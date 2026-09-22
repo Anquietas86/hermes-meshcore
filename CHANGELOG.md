@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.1
+
+- Fix package-relative `meshcore_utils` imports when Hermes loads the plugin as a package.
+- Retain a narrow top-level import fallback for the standalone test runner.
+- Restore passwordless cross-process admin-query submission while keeping gateway-side authorization.
+- Tighten parser boundary validation and add regression coverage for malformed frames.
+- Fix dashboard radio-stat key mapping and CI Python executable resolution.
+
 ## 1.10.0
 
 - Enforce source-scoped admin tool access with a dedicated `meshcore_admin` toolset.
