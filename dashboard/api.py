@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import time
-from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request

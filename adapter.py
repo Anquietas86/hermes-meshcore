@@ -1145,7 +1145,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
         # Different limits: DMs = 150, channels = 135 — but we use 130
         # for both to stay safely under firmware byte limits, matching the
         # HA automation chunking strategy that works reliably.
-        is_channel = chat_id.startswith("channel:")
         max_len = 130  # unified: safe for both DMs and channels
         marker_len = max_len - 13  # reserve 13 chars for " ... (N/M)"
 
@@ -2172,7 +2171,9 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
     """Handler for meshcore_admin_query tool. Uses the file-based request/response
     mechanism — writes a request file that the gateway's keepalive loop picks up,
     then polls for the response. Works from any session, not just the gateway process."""
-    import os, json, time
+    import os
+    import json
+    import time
 
     REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
     RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
@@ -2280,7 +2281,7 @@ def _env_enablement():
 
 def interactive_setup():
     from hermes_cli.setup import (prompt, prompt_yes_no, save_env_value, get_env_value,
-                                   print_header, print_info, print_warning, print_success)
+                                   print_header, print_info, print_success)
     print_header("MeshCore")
     existing = get_env_value("MESHCORE_HOST")
     if existing:
