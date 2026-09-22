@@ -41,7 +41,7 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
-from utils import (
+from meshcore_utils import (
     get_profile_scoped_dir,
     secure_write_json,
     secure_read_json,
@@ -212,7 +212,7 @@ class MeshCoreRawConnection:
                 if b[0] == FRAME_RECV_MARKER:
                     break
                 junk_buf.append(b[0])
-            
+
             if junk_buf:
                 # Log readable chunks (hex + ascii) for debug analysis
                 if len(junk_buf) > 3 or any(c < 0x20 or c > 0x7E for c in junk_buf):
@@ -345,7 +345,7 @@ class MeshCoreRawConnection:
         """Parse SELF_INFO (0x05) response."""
         if len(payload) < 42:  # Minimum expected length
             raise ValueError(f"SELF_INFO payload too short: {len(payload)} bytes, expected at least 42")
-        
+
         buf = io.BytesIO(payload)
         info = {}
         info["adv_type"] = buf.read(1)[0]
@@ -373,7 +373,7 @@ class MeshCoreRawConnection:
         """Parse DEVICE_INFO (0x0D) response."""
         if len(payload) < 1:  # At least version byte required
             raise ValueError(f"DEVICE_INFO payload too short: {len(payload)} bytes, expected at least 1")
-            
+
         buf = io.BytesIO(payload)
         info = {}
         fw_ver = buf.read(1)[0]
@@ -435,7 +435,7 @@ class MeshCoreRawConnection:
         min_len = 12 if is_v3 else 11  # Minimum length accounting for V3 vs standard
         if len(payload) < min_len:
             raise ValueError(f"CONTACT_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
-            
+
         buf = io.BytesIO(payload)
         msg = {"type": "PRIV"}
         if is_v3:
@@ -475,7 +475,7 @@ class MeshCoreRawConnection:
         min_len = 8 if is_v3 else 7  # Minimum length accounting for V3 vs standard
         if len(payload) < min_len:
             raise ValueError(f"CHANNEL_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
-            
+
         buf = io.BytesIO(payload)
         msg = {"type": "CHAN"}
         if is_v3:
@@ -499,7 +499,7 @@ class MeshCoreRawConnection:
         """Parse CONTACT (0x03) entry."""
         if len(payload) < 41:  # Minimum expected length
             raise ValueError(f"CONTACT payload too short: {len(payload)} bytes, expected at least 41")
-            
+
         buf = io.BytesIO(payload)
         c = {}
         c["public_key"] = buf.read(32).hex()
@@ -531,7 +531,7 @@ class MeshCoreRawConnection:
         """
         if len(payload) < 1:  # Need at least the channel index
             raise ValueError(f"CHANNEL_INFO payload too short: {len(payload)} bytes, expected at least 1")
-            
+
         buf = io.BytesIO(payload)
         info = {"channel_idx": buf.read(1)[0]}
         # Read name until null byte (max 32 bytes)
@@ -996,10 +996,6 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     # ── State file for dashboard ──────────────────────────────────────────
 
-    STATE_FILE = "/tmp/hermes-meshcore-state.json"
-    ADMIN_REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
-    ADMIN_RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
-
     def _write_state_file(self):
         """Write current adapter state to a shared JSON file for the dashboard API."""
         try:
@@ -1036,17 +1032,29 @@ class MeshCoreAdapter(BasePlatformAdapter):
             req_data = secure_read_json(self.ADMIN_REQUEST_FILE)
             if req_data is None:
                 return
-            
+
             # Remove request file so we don't re-process it
             secure_remove(self.ADMIN_REQUEST_FILE)
 
             node = req_data.get("node", "")
             command = req_data.get("command", "")
-            password = req_data.get("password", "")
             request_id = req_data.get("request_id", "")
 
-            logger.info("MeshCore: processing admin request %s: %s → %s", request_id, node, command)
-            result = await self.query_remote_repeater(node, command, password=password, timeout=90.0)
+            if "password" in req_data:
+                result = {
+                    "success": False,
+                    "error": "Password-bearing IPC requests are not supported",
+                }
+            else:
+                logger.info(
+                    "MeshCore: processing admin request %s: %s → %s",
+                    request_id,
+                    node,
+                    command,
+                )
+                result = await self.query_remote_repeater(
+                    node, command, password="", timeout=90.0
+                )
             result["request_id"] = request_id
             result["completed_at"] = time.time()
 
@@ -1987,6 +1995,17 @@ class MeshCoreAdapter(BasePlatformAdapter):
             "req_regions":     (CMD_SEND_ANON_REQ, ANONREQ_REGIONS, None),
         }
 
+        mapping = BINARY_COMMAND_MAP.get(command)
+        if mapping is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Unknown command: {command!r}. "
+                    "Only documented read-only commands are accepted. "
+                    "Supported: " + ", ".join(sorted(BINARY_COMMAND_MAP))
+                ),
+            }
+
         if not self._conn or not self._conn.is_connected:
             return {"success": False, "error": "Gateway not connected to node"}
 
@@ -2050,19 +2069,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     return {"success": False, "error": "Login timed out — no response from repeater"}
 
                 # ── Send the command ──
-                mapping = BINARY_COMMAND_MAP.get(command)
-                if mapping:
-                    cmd_opcode, sub_type, extra_data = mapping
-                    # Build binary request: opcode + 32-byte key + sub_type + extra_data
-                    cmd_bytes = bytes([cmd_opcode]) + full_key + bytes([sub_type])
-                    if extra_data:
-                        cmd_bytes += extra_data
-                    logger.debug("MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
-                                 cmd_opcode, sub_type)
-                else:
-                    return {"success": False, "error": f"Unknown command: {command!r}. "
-                            "Only documented read-only commands are accepted. "
-                            "Supported: " + ", ".join(sorted(BINARY_COMMAND_MAP.keys()))}
+                cmd_opcode, sub_type, extra_data = mapping
+                # Build binary request: opcode + 32-byte key + sub_type + extra_data
+                cmd_bytes = bytes([cmd_opcode]) + full_key + bytes([sub_type])
+                if extra_data:
+                    cmd_bytes += extra_data
+                logger.debug(
+                    "MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
+                    cmd_opcode,
+                    sub_type,
+                )
 
                 logger.debug("MeshCore: admin query cmd bytes: %s", cmd_bytes.hex()[:60])
                 try:
@@ -2275,19 +2291,25 @@ async def _handle_meshcore_admin(node: str, command: str, password: str = "") ->
 
 
 async def _handle_meshcore_admin_query(node: str, command: str, password: str = "") -> str:
-    """Handler for meshcore_admin_query tool. Uses the file-based request/response
-    mechanism — writes a request file that the gateway's keepalive loop picks up,
-    then polls for the response. Works from any session, not just the gateway process."""
+    """Submit a passwordless query over profile-scoped file IPC.
+
+    A password can only be used through ``meshcore_admin`` in the gateway
+    process, where it remains in memory. Cross-process IPC rejects it.
+    """
     auth_error = _check_admin_auth()
     if auth_error is not None:
         return auth_error
+    if password:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "Password-bearing IPC requests are not supported; use "
+                "meshcore_admin in the gateway process"
+            ),
+        })
 
     import os
-    import json
-    import time
 
-    # Use profile-scoped files
-    from utils import get_profile_scoped_dir, secure_write_json, secure_read_json, generate_request_id
     profile_dir = get_profile_scoped_dir()
     REQUEST_FILE = str(profile_dir / "admin-request.json")
     RESPONSE_FILE = str(profile_dir / "admin-response.json")
@@ -2314,7 +2336,6 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
         "request_id": request_id,
         "node": node,
         "command": command,
-        "password": password,  # Note: password travels in memory to file briefly
         "submitted_at": time.time(),
     }
     secure_write_json(REQUEST_FILE, request)
@@ -2492,18 +2513,13 @@ def register(ctx):
                         "type": "string",
                         "description": "CLI command to send (e.g. 'stats-core', 'ver', 'neighbors', 'all')"
                     },
-                    "password": {
-                        "type": "string",
-                        "description": "Optional admin password for the repeater"
-                    },
                 },
                 "required": ["node", "command"],
             },
         },
         handler=lambda args, **kw: _handle_meshcore_admin_query(
             node=args.get("node", ""),
-            command=args.get("command", ""),
-            password=args.get("password", "")),
+            command=args.get("command", "")),
         is_async=True,
         emoji="🛰️",
     )

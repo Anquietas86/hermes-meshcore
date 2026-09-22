@@ -15,7 +15,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from utils import get_profile_scoped_dir
+from meshcore_utils import get_profile_scoped_dir
 
 router = APIRouter()
 
@@ -302,22 +302,26 @@ async def submit_admin_query(request: Request):
 
     if not node or not command:
         raise HTTPException(status_code=400, detail="node and command are required")
+    if password:
+        raise HTTPException(
+            status_code=400,
+            detail="Password-bearing IPC requests are not supported",
+        )
 
     # Check if a request is already pending
     admin_request_file = _get_admin_request_file()
     if os.path.exists(admin_request_file):
         raise HTTPException(status_code=409, detail="An admin query is already in progress")
 
-    from utils import generate_request_id
+    from meshcore_utils import generate_request_id
     request_id = generate_request_id()
     req_data = {
         "request_id": request_id,
         "node": node,
         "command": command,
-        "password": password,
         "submitted_at": time.time(),
     }
-    from utils import secure_write_json
+    from meshcore_utils import secure_write_json
     secure_write_json(admin_request_file, req_data)
 
     return JSONResponse({"success": True, "request_id": request_id, "message": "Query submitted — gateway will process within 15s"})
@@ -335,7 +339,7 @@ async def get_admin_result(request_id: str = ""):
     if not os.path.exists(admin_response_file):
         return JSONResponse({"status": "pending", "message": "Waiting for response…"})
 
-    from utils import secure_read_json
+    from meshcore_utils import secure_read_json
     try:
         result = secure_read_json(admin_response_file, require_matching_request_id=request_id if request_id else None)
     except ValueError:
@@ -346,7 +350,7 @@ async def get_admin_result(request_id: str = ""):
         return JSONResponse({"status": "pending", "message": "Waiting for response…"})
 
     # Clean up response file after reading
-    from utils import secure_remove
+    from meshcore_utils import secure_remove
     secure_remove(admin_response_file)
     return JSONResponse({"status": "complete", "result": result})
 
@@ -362,7 +366,7 @@ async def trigger_advert():
         raise HTTPException(status_code=409, detail="An advert request is already pending")
 
     req_data = {"action": "advert", "submitted_at": time.time()}
-    from utils import secure_write_json
+    from meshcore_utils import secure_write_json
     secure_write_json(advert_request_file, req_data)
 
     return JSONResponse({"success": True, "message": "Advert request submitted — gateway will process within 15s"})

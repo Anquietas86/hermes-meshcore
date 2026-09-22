@@ -153,7 +153,7 @@ def test_admin_handler_rejected_no_instance():
     MeshCoreAdapter._instance = None
     try:
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             _handle_meshcore_admin("test-node", "ver")
         )
         parsed = json.loads(result)
@@ -168,7 +168,7 @@ def test_admin_handler_rejected_no_admin_config():
     MeshCoreAdapter._instance = adapter
     try:
         import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             _handle_meshcore_admin("test-node", "ver")
         )
         parsed = json.loads(result)
@@ -182,7 +182,7 @@ def test_admin_query_handler_auth_gate():
     """_handle_meshcore_admin_query also gates on _check_admin_auth."""
     MeshCoreAdapter._instance = None
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         _handle_meshcore_admin_query("test-node", "ver")
     )
     parsed = json.loads(result)
@@ -190,11 +190,29 @@ def test_admin_query_handler_auth_gate():
     assert "not connected" in parsed["error"]
 
 
+def test_admin_query_rejects_password_bearing_ipc():
+    """Cross-process admin queries must not accept a password."""
+    instance = _make_adapter(admin_nodes={"admin-node"})
+    MeshCoreAdapter._instance = instance
+    try:
+        import asyncio
+        result = asyncio.run(
+            _handle_meshcore_admin_query(
+                "test-node", "ver", password="query-password-sentinel"
+            )
+        )
+        parsed = json.loads(result)
+        assert parsed["success"] is False
+        assert "not supported" in parsed["error"]
+    finally:
+        MeshCoreAdapter._instance = None
+
+
 def test_contact_handler_no_auth_required():
     """meshcore_contact should remain accessible — no admin auth required."""
     MeshCoreAdapter._instance = None
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         _handle_meshcore_contact("test-node")
     )
     parsed = json.loads(result)
@@ -230,7 +248,7 @@ def test_query_remote_repeater_rejects_unknown_command():
     }
 
     # "reboot" is not in BINARY_COMMAND_MAP — must be rejected
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         adapter.query_remote_repeater("test-node", "reboot")
     )
     assert result["success"] is False
@@ -264,7 +282,7 @@ def test_query_remote_repeater_accepts_known_command():
     }
 
     # "ver" IS in BINARY_COMMAND_MAP — should be accepted (login happens)
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         adapter.query_remote_repeater("test-node", "ver")
     )
     # The login portion will likely fail since we're using a fake connection,
