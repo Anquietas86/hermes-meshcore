@@ -9,15 +9,27 @@ import json
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from utils import get_profile_scoped_dir
+
 router = APIRouter()
 
-STATE_FILE = "/tmp/hermes-meshcore-state.json"
+# Use profile-scoped state file
+PROFILE_STATE_FILE = None  # Will be set dynamically
 MAX_STALE_SECONDS = 60
+
+def _get_state_file():
+    """Get the profile-scoped state file path."""
+    global PROFILE_STATE_FILE
+    if PROFILE_STATE_FILE is None:
+        profile_dir = get_profile_scoped_dir()
+        PROFILE_STATE_FILE = str(profile_dir / "state.json")
+    return PROFILE_STATE_FILE
 
 # Auto-detect which profile runs MeshCore — check meshcore profile first, fall back to default
 def _detect_profile() -> str:
@@ -44,19 +56,35 @@ CONFIG_KEYS = [
     "admin_nodes",
     "admin_channels",
     "monitor_channels",
-    "require_mention_channels",
+    "require_mention",  # Changed to match the adapter's env var name
     "allow_all_users",
     "allowed_users",
     "enable_dms",
 ]
 
+def _get_admin_request_file():
+    """Get the profile-scoped admin request file path."""
+    profile_dir = get_profile_scoped_dir()
+    return str(profile_dir / "admin-request.json")
+
+def _get_admin_response_file():
+    """Get the profile-scoped admin response file path."""
+    profile_dir = get_profile_scoped_dir()
+    return str(profile_dir / "admin-response.json")
+
+def _get_advert_request_file():
+    """Get the profile-scoped advert request file path."""
+    profile_dir = get_profile_scoped_dir()
+    return str(profile_dir / "advert-request.json")
+
 
 def _read_state() -> dict:
     """Read the shared state file written by the gateway adapter."""
     try:
-        if not os.path.exists(STATE_FILE):
+        state_file = _get_state_file()
+        if not os.path.exists(state_file):
             return {"connected": False, "error": "Gateway not running (no state file)"}
-        with open(STATE_FILE) as f:
+        with open(state_file) as f:
             state = json.load(f)
         age = time.time() - state.get("updated_at", 0)
         if age > MAX_STALE_SECONDS:
@@ -96,8 +124,8 @@ def _read_config() -> dict:
             "admin_nodes": env_vars.get("MESHCORE_ADMIN_NODES", extra.get("admin_nodes", "")),
             "admin_channels": env_vars.get("MESHCORE_ADMIN_CHANNELS", extra.get("admin_channels", "")),
             "monitor_channels": env_vars.get("MESHCORE_MONITOR_CHANNELS", extra.get("monitor_channels", "")),
-            "require_mention_channels": env_vars.get("MESHCORE_REQUIRE_MENTION", extra.get("require_mention_channels", "")),
-            "allow_all_users": env_vars.get("MESHCORE_ALLOW_ALL_USERS", extra.get("allow_all_users", "true")),
+            "require_mention": env_vars.get("MESHCORE_REQUIRE_MENTION", extra.get("require_mention", "")),  # Updated key name
+            "allow_all_users": env_vars.get("MESHCORE_ALLOW_ALL_USERS", extra.get("allow_all_users", "false")),  # Changed default to match adapter
             "allowed_users": env_vars.get("MESHCORE_ALLOWED_USERS", extra.get("allowed_users", "")),
             "enable_dms": env_vars.get("MESHCORE_ENABLE_DMS", extra.get("enable_dms", "true")),
         }
@@ -110,7 +138,7 @@ CONFIG_TO_ENV = {
     "admin_nodes": "MESHCORE_ADMIN_NODES",
     "admin_channels": "MESHCORE_ADMIN_CHANNELS",
     "monitor_channels": "MESHCORE_MONITOR_CHANNELS",
-    "require_mention_channels": "MESHCORE_REQUIRE_MENTION",
+    "require_mention": "MESHCORE_REQUIRE_MENTION",  # Updated key name
     "allow_all_users": "MESHCORE_ALLOW_ALL_USERS",
     "allowed_users": "MESHCORE_ALLOWED_USERS",
     "enable_dms": "MESHCORE_ENABLE_DMS",
@@ -259,10 +287,6 @@ async def restart_gateway():
 
 # ── Admin query routes ──────────────────────────────────────────────────────
 
-ADMIN_REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
-ADMIN_RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
-
-
 @router.post("/admin/query")
 async def submit_admin_query(request: Request):
     """Submit an admin query for a remote repeater. The gateway's keepalive
@@ -280,10 +304,12 @@ async def submit_admin_query(request: Request):
         raise HTTPException(status_code=400, detail="node and command are required")
 
     # Check if a request is already pending
-    if os.path.exists(ADMIN_REQUEST_FILE):
+    admin_request_file = _get_admin_request_file()
+    if os.path.exists(admin_request_file):
         raise HTTPException(status_code=409, detail="An admin query is already in progress")
 
-    request_id = str(int(time.time()))
+    from utils import generate_request_id
+    request_id = generate_request_id()
     req_data = {
         "request_id": request_id,
         "node": node,
@@ -291,8 +317,8 @@ async def submit_admin_query(request: Request):
         "password": password,
         "submitted_at": time.time(),
     }
-    with open(ADMIN_REQUEST_FILE, "w") as f:
-        json.dump(req_data, f)
+    from utils import secure_write_json
+    secure_write_json(admin_request_file, req_data)
 
     return JSONResponse({"success": True, "request_id": request_id, "message": "Query submitted — gateway will process within 15s"})
 
@@ -301,38 +327,42 @@ async def submit_admin_query(request: Request):
 async def get_admin_result(request_id: str = ""):
     """Poll for the result of an admin query. Returns the response if complete,
     or status=pending if still waiting."""
-    if os.path.exists(ADMIN_REQUEST_FILE):
+    admin_request_file = _get_admin_request_file()
+    if os.path.exists(admin_request_file):
         return JSONResponse({"status": "pending", "message": "Request not yet picked up by gateway"})
 
-    if not os.path.exists(ADMIN_RESPONSE_FILE):
+    admin_response_file = _get_admin_response_file()
+    if not os.path.exists(admin_response_file):
         return JSONResponse({"status": "pending", "message": "Waiting for response…"})
 
-    with open(ADMIN_RESPONSE_FILE) as f:
-        result = json.load(f)
-
-    # If request_id provided, only return matching result
-    if request_id and result.get("request_id") != request_id:
+    from utils import secure_read_json
+    try:
+        result = secure_read_json(admin_response_file, require_matching_request_id=request_id if request_id else None)
+    except ValueError:
+        # Request ID mismatch
         return JSONResponse({"status": "pending", "message": "Different request in progress"})
 
+    if result is None:
+        return JSONResponse({"status": "pending", "message": "Waiting for response…"})
+
     # Clean up response file after reading
-    os.remove(ADMIN_RESPONSE_FILE)
+    from utils import secure_remove
+    secure_remove(admin_response_file)
     return JSONResponse({"status": "complete", "result": result})
 
 
 # ── Advert trigger ──────────────────────────────────────────────────────────
 
-ADVERT_REQUEST_FILE = "/tmp/hermes-meshcore-advert-request.json"
-
-
 @router.post("/advert")
 async def trigger_advert():
     """Trigger a flood advert on the local node. The gateway's keepalive
     loop picks it up within 15s and sends the advert command."""
-    if os.path.exists(ADVERT_REQUEST_FILE):
+    advert_request_file = _get_advert_request_file()
+    if os.path.exists(advert_request_file):
         raise HTTPException(status_code=409, detail="An advert request is already pending")
 
     req_data = {"action": "advert", "submitted_at": time.time()}
-    with open(ADVERT_REQUEST_FILE, "w") as f:
-        json.dump(req_data, f)
+    from utils import secure_write_json
+    secure_write_json(advert_request_file, req_data)
 
     return JSONResponse({"success": True, "message": "Advert request submitted — gateway will process within 15s"})

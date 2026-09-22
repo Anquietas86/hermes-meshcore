@@ -41,6 +41,13 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
+from utils import (
+    get_profile_scoped_dir,
+    secure_write_json,
+    secure_read_json,
+    secure_remove,
+    generate_request_id
+)
 
 
 # ── Protocol constants ────────────────────────────────────────────────────
@@ -237,6 +244,8 @@ class MeshCoreRawConnection:
 
     async def send_frame(self, payload: bytes) -> None:
         """Send one frame: 0x3C + 2-byte LE size + payload."""
+        if len(payload) > MAX_FRAME_SIZE:
+            raise ValueError(f"Frame payload too large: {len(payload)} bytes, maximum is {MAX_FRAME_SIZE}")
         size = len(payload)
         frame = bytes([FRAME_SEND_MARKER]) + size.to_bytes(2, "little") + payload
         self.writer.write(frame)
@@ -334,6 +343,9 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_self_info(payload: bytes) -> dict:
         """Parse SELF_INFO (0x05) response."""
+        if len(payload) < 42:  # Minimum expected length
+            raise ValueError(f"SELF_INFO payload too short: {len(payload)} bytes, expected at least 42")
+        
         buf = io.BytesIO(payload)
         info = {}
         info["adv_type"] = buf.read(1)[0]
@@ -359,11 +371,16 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_device_info(payload: bytes) -> dict:
         """Parse DEVICE_INFO (0x0D) response."""
+        if len(payload) < 1:  # At least version byte required
+            raise ValueError(f"DEVICE_INFO payload too short: {len(payload)} bytes, expected at least 1")
+            
         buf = io.BytesIO(payload)
         info = {}
         fw_ver = buf.read(1)[0]
         info["fw_ver"] = fw_ver
         if fw_ver >= 3:
+            if len(payload) < 5:  # Need at least 5 bytes for version 3
+                raise ValueError(f"DEVICE_INFO payload too short for v3: {len(payload)} bytes")
             info["max_contacts"] = buf.read(1)[0] * 2
             info["max_channels"] = buf.read(1)[0]
             info["ble_pin"] = int.from_bytes(buf.read(4), "little")
@@ -375,7 +392,8 @@ class MeshCoreRawConnection:
             if len(rpt) > 0:
                 info["repeat"] = (rpt[0] != 0)
         if fw_ver >= 10:
-            info["path_hash_mode"] = buf.read(1)[0]
+            if buf.tell() < len(payload):
+                info["path_hash_mode"] = buf.read(1)[0]
         return info
 
     @staticmethod
@@ -393,6 +411,8 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_msg_sent(payload: bytes) -> dict:
         """Parse MSG_SENT (0x06) response."""
+        if len(payload) < 9:  # Minimum: type(1) + expected_ack(4) + timeout(4)
+            raise ValueError(f"MSG_SENT payload too short: {len(payload)} bytes, expected at least 9")
         buf = io.BytesIO(payload)
         return {
             "type": buf.read(1)[0],
@@ -412,6 +432,10 @@ class MeshCoreRawConnection:
         bytes follow it.  Same bug as parse_channel_msg: the old code read phantom
         path bytes that consumed txt_type, timestamp, and the start of the message.
         """
+        min_len = 12 if is_v3 else 11  # Minimum length accounting for V3 vs standard
+        if len(payload) < min_len:
+            raise ValueError(f"CONTACT_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
+            
         buf = io.BytesIO(payload)
         msg = {"type": "PRIV"}
         if is_v3:
@@ -428,7 +452,10 @@ class MeshCoreRawConnection:
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little")
         if msg["txt_type"] == 2:
-            msg["signature"] = buf.read(4).hex()
+            if buf.tell() + 4 <= len(payload):  # Check if we have enough bytes for signature
+                msg["signature"] = buf.read(4).hex()
+            else:
+                msg["signature"] = ""
         msg["text"] = buf.read().decode("utf-8", "ignore")
         return msg
 
@@ -445,6 +472,10 @@ class MeshCoreRawConnection:
         as path data, consuming txt_type, timestamp, and the start of the message
         text (butchering sender names like ADL-HANDHELD → HELD/NDHELD).
         """
+        min_len = 8 if is_v3 else 7  # Minimum length accounting for V3 vs standard
+        if len(payload) < min_len:
+            raise ValueError(f"CHANNEL_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
+            
         buf = io.BytesIO(payload)
         msg = {"type": "CHAN"}
         if is_v3:
@@ -466,6 +497,9 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_contact(payload: bytes) -> dict:
         """Parse CONTACT (0x03) entry."""
+        if len(payload) < 41:  # Minimum expected length
+            raise ValueError(f"CONTACT payload too short: {len(payload)} bytes, expected at least 41")
+            
         buf = io.BytesIO(payload)
         c = {}
         c["public_key"] = buf.read(32).hex()
@@ -478,8 +512,10 @@ class MeshCoreRawConnection:
         else:
             c["out_path_hash_mode"] = plen >> 6
             c["out_path_len"] = plen & 0x3F
-        c["out_path"] = buf.read(64).replace(b"\x00", b"").hex()
-        c["adv_name"] = buf.read(32).decode("utf-8", "ignore").replace("\x00", "")
+        path_bytes = buf.read(64)
+        c["out_path"] = path_bytes.replace(b"\x00", b"").hex()
+        name_bytes = buf.read(32)
+        c["adv_name"] = name_bytes.decode("utf-8", "ignore").replace("\x00", "")
         c["last_advert"] = int.from_bytes(buf.read(4), "little")
         c["adv_lat"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
         c["adv_lon"] = int.from_bytes(buf.read(4), "little", signed=True) / 1e6
@@ -493,6 +529,9 @@ class MeshCoreRawConnection:
         Format: 1-byte channel_idx + null-terminated name (max 32 bytes)
         + 16-byte channel secret.
         """
+        if len(payload) < 1:  # Need at least the channel index
+            raise ValueError(f"CHANNEL_INFO payload too short: {len(payload)} bytes, expected at least 1")
+            
         buf = io.BytesIO(payload)
         info = {"channel_idx": buf.read(1)[0]}
         # Read name until null byte (max 32 bytes)
@@ -514,25 +553,34 @@ class MeshCoreRawConnection:
         data = payload[1:]
         if stats_type == 0:  # core
             if len(data) >= 9:
-                battery_mv, uptime, errors, queue_len = struct.unpack('<H I H B', data[:9])
-                return {"battery_mv": battery_mv, "uptime_secs": uptime,
-                        "errors": errors, "queue_len": queue_len}
+                try:
+                    battery_mv, uptime, errors, queue_len = struct.unpack('<H I H B', data[:9])
+                    return {"battery_mv": battery_mv, "uptime_secs": uptime,
+                            "errors": errors, "queue_len": queue_len}
+                except struct.error:
+                    return {"error": "Malformed core stats payload"}
         elif stats_type == 1:  # radio
             if len(data) >= 12:
-                noise, rssi, snr_scaled, tx_air, rx_air = struct.unpack('<h b b I I', data[:12])
-                return {"noise_floor": noise, "last_rssi": rssi,
-                        "last_snr": snr_scaled / 4.0, "tx_air_secs": tx_air,
-                        "rx_air_secs": rx_air}
+                try:
+                    noise, rssi, snr_scaled, tx_air, rx_air = struct.unpack('<h b b I I', data[:12])
+                    return {"noise_floor_dbm": noise, "last_rssi_dbm": rssi,
+                            "last_snr_db": snr_scaled / 4.0, "tx_air_secs": tx_air,
+                            "rx_air_secs": rx_air}
+                except struct.error:
+                    return {"error": "Malformed radio stats payload"}
         elif stats_type == 2:  # packets
             if len(data) >= 24:
-                recv, sent, flood_tx, direct_tx, flood_rx, direct_rx = \
-                    struct.unpack('<I I I I I I', data[:24])
-                result = {"recv": recv, "sent": sent, "flood_tx": flood_tx,
-                          "direct_tx": direct_tx, "flood_rx": flood_rx,
-                          "direct_rx": direct_rx}
-                if len(data) >= 28:
-                    result["recv_errors"] = struct.unpack('<I', data[24:28])[0]
-                return result
+                try:
+                    recv, sent, flood_tx, direct_tx, flood_rx, direct_rx = \
+                        struct.unpack('<I I I I I I', data[:24])
+                    result = {"recv": recv, "sent": sent, "flood_tx": flood_tx,
+                              "direct_tx": direct_tx, "flood_rx": flood_rx,
+                              "direct_rx": direct_rx}
+                    if len(data) >= 28:
+                        result["recv_errors"] = struct.unpack('<I', data[24:28])[0]
+                    return result
+                except struct.error:
+                    return {"error": "Malformed packet stats payload"}
         return {}
 
 
@@ -622,6 +670,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
         # unsolicited during a poll command's wait and then again as the
         # poll response. Keys: "dm:{pubkey}:{ts}" / "ch:{idx}:{sender}:{ts}"
         self._seen_messages: Set[str] = set()
+
+        # Initialize profile-scoped file paths
+        self._profile_dir = get_profile_scoped_dir()
+        self.STATE_FILE = str(self._profile_dir / "state.json")
+        self.ADMIN_REQUEST_FILE = str(self._profile_dir / "admin-request.json")
+        self.ADMIN_RESPONSE_FILE = str(self._profile_dir / "admin-response.json")
+        self.ADVERT_REQUEST_FILE = str(self._profile_dir / "advert-request.json")
 
     @property
     def name(self) -> str:
@@ -970,8 +1025,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 },
                 "updated_at": time.time(),
             }
-            with open(self.STATE_FILE, "w") as f:
-                json.dump(state, f)
+            secure_write_json(self.STATE_FILE, state)
         except Exception:
             pass  # Non-critical — dashboard will show stale data
 
@@ -979,25 +1033,24 @@ class MeshCoreAdapter(BasePlatformAdapter):
         """Check for a pending admin request file from the dashboard, process it,
         and write the response. Runs inside the keepalive loop (every 15s)."""
         try:
-            if not os.path.exists(self.ADMIN_REQUEST_FILE):
+            req_data = secure_read_json(self.ADMIN_REQUEST_FILE)
+            if req_data is None:
                 return
-            with open(self.ADMIN_REQUEST_FILE) as f:
-                req = json.load(f)
+            
             # Remove request file so we don't re-process it
-            os.remove(self.ADMIN_REQUEST_FILE)
+            secure_remove(self.ADMIN_REQUEST_FILE)
 
-            node = req.get("node", "")
-            command = req.get("command", "")
-            password = req.get("password", "")
-            request_id = req.get("request_id", "")
+            node = req_data.get("node", "")
+            command = req_data.get("command", "")
+            password = req_data.get("password", "")
+            request_id = req_data.get("request_id", "")
 
             logger.info("MeshCore: processing admin request %s: %s → %s", request_id, node, command)
             result = await self.query_remote_repeater(node, command, password=password, timeout=90.0)
             result["request_id"] = request_id
             result["completed_at"] = time.time()
 
-            with open(self.ADMIN_RESPONSE_FILE, "w") as f:
-                json.dump(result, f)
+            secure_write_json(self.ADMIN_RESPONSE_FILE, result)
             logger.debug("MeshCore: admin request %s complete: %s", request_id,
                         "success" if result.get("success") else "failed")
         except Exception as e:
@@ -1006,11 +1059,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def _process_advert_request(self):
         """Check for a pending advert request file from the dashboard and
         send a flood advert on the local node."""
-        ADVERT_REQ = "/tmp/hermes-meshcore-advert-request.json"
         try:
-            if not os.path.exists(ADVERT_REQ):
+            if not os.path.exists(self.ADVERT_REQUEST_FILE):
                 return
-            os.remove(ADVERT_REQ)
+            os.remove(self.ADVERT_REQUEST_FILE)
             logger.info("MeshCore: processing advert request from dashboard")
             await self._conn.send_command(b"\x07\x01", [PKT_OK, PKT_ERROR])
             logger.info("MeshCore: sent flood advert (dashboard trigger)")
@@ -2234,15 +2286,18 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
     import json
     import time
 
-    REQUEST_FILE = "/tmp/hermes-meshcore-admin-request.json"
-    RESPONSE_FILE = "/tmp/hermes-meshcore-admin-response.json"
+    # Use profile-scoped files
+    from utils import get_profile_scoped_dir, secure_write_json, secure_read_json, generate_request_id
+    profile_dir = get_profile_scoped_dir()
+    REQUEST_FILE = str(profile_dir / "admin-request.json")
+    RESPONSE_FILE = str(profile_dir / "admin-response.json")
+    STATE_FILE = str(profile_dir / "state.json")
 
     # Check if a request is already pending
     if os.path.exists(REQUEST_FILE):
         return json.dumps({"success": False, "error": "An admin query is already in progress — wait and retry"})
 
     # Check gateway is running (state file exists and is fresh)
-    STATE_FILE = "/tmp/hermes-meshcore-state.json"
     if not os.path.exists(STATE_FILE):
         return json.dumps({"success": False, "error": "MeshCore gateway not running (no state file)"})
     try:
@@ -2253,17 +2308,16 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
     except Exception:
         return json.dumps({"success": False, "error": "Cannot read gateway state"})
 
-    # Write request
-    request_id = str(int(time.time()))
+    # Generate unique request ID
+    request_id = generate_request_id()
     request = {
         "request_id": request_id,
         "node": node,
         "command": command,
-        "password": password,
+        "password": password,  # Note: password travels in memory to file briefly
         "submitted_at": time.time(),
     }
-    with open(REQUEST_FILE, "w") as f:
-        json.dump(request, f)
+    secure_write_json(REQUEST_FILE, request)
 
     # Poll for response (up to 60s)
     deadline = time.time() + 60
@@ -2272,10 +2326,9 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
         if not os.path.exists(RESPONSE_FILE):
             continue
         try:
-            with open(RESPONSE_FILE) as f:
-                result = json.load(f)
-            if result.get("request_id") == request_id:
-                os.remove(RESPONSE_FILE)
+            result = secure_read_json(RESPONSE_FILE, require_matching_request_id=request_id)
+            if result is not None:
+                os.remove(RESPONSE_FILE)  # Clean up after reading
                 return json.dumps(result)
         except Exception:
             continue
