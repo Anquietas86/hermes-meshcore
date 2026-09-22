@@ -178,16 +178,18 @@ def test_admin_handler_rejected_no_admin_config():
         MeshCoreAdapter._instance = None
 
 
-def test_admin_query_handler_auth_gate():
-    """_handle_meshcore_admin_query also gates on _check_admin_auth."""
+def test_admin_query_handler_requires_running_gateway():
+    """A separate session checks gateway state, not a local singleton."""
     MeshCoreAdapter._instance = None
     import asyncio
-    result = asyncio.run(
-        _handle_meshcore_admin_query("test-node", "ver")
-    )
+    from unittest.mock import patch
+    from tempfile import TemporaryDirectory
+    from pathlib import Path
+    with TemporaryDirectory() as tmp, patch("adapter.get_profile_scoped_dir", return_value=Path(tmp)):
+        result = asyncio.run(_handle_meshcore_admin_query("test-node", "ver"))
     parsed = json.loads(result)
     assert parsed["success"] is False
-    assert "not connected" in parsed["error"]
+    assert "no state file" in parsed["error"]
 
 
 def test_admin_query_rejects_password_bearing_ipc():

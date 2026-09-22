@@ -11,6 +11,7 @@ TEST_MODULES = (
     "test_security",
     "test_security_enhanced",
     "test_integration",
+    "test_regressions",
 )
 
 

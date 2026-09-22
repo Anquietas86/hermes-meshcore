@@ -228,22 +228,19 @@ class MeshCoreRawConnection:
             size_bytes = await self._read_exactly(2)
             size = int.from_bytes(size_bytes, "little")
 
-            if size > MAX_FRAME_SIZE:
-                logger.warning("MeshCore(raw): invalid frame size %d, skipping", size)
-                continue
+            if not 1 <= size <= MAX_FRAME_SIZE:
+                raise ValueError(f"Invalid frame size: {size}")
 
             # Read payload
             payload = await self._read_exactly(size)
-
-            if len(payload) < 1:
-                logger.warning("MeshCore(raw): empty payload")
-                continue
 
             pkt_type = payload[0]
             return pkt_type, payload[1:]
 
     async def send_frame(self, payload: bytes) -> None:
         """Send one frame: 0x3C + 2-byte LE size + payload."""
+        if not payload:
+            raise ValueError("Frame payload must include a packet type")
         if len(payload) > MAX_FRAME_SIZE:
             raise ValueError(f"Frame payload too large: {len(payload)} bytes, maximum is {MAX_FRAME_SIZE}")
         size = len(payload)
@@ -343,8 +340,8 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_self_info(payload: bytes) -> dict:
         """Parse SELF_INFO (0x05) response."""
-        if len(payload) < 42:  # Minimum expected length
-            raise ValueError(f"SELF_INFO payload too short: {len(payload)} bytes, expected at least 42")
+        if len(payload) < 57:
+            raise ValueError(f"SELF_INFO payload too short: {len(payload)} bytes, expected at least 57")
 
         buf = io.BytesIO(payload)
         info = {}
@@ -379,7 +376,7 @@ class MeshCoreRawConnection:
         fw_ver = buf.read(1)[0]
         info["fw_ver"] = fw_ver
         if fw_ver >= 3:
-            if len(payload) < 5:  # Need at least 5 bytes for version 3
+            if len(payload) < 79:  # Fixed v3 fields, including firmware strings
                 raise ValueError(f"DEVICE_INFO payload too short for v3: {len(payload)} bytes")
             info["max_contacts"] = buf.read(1)[0] * 2
             info["max_channels"] = buf.read(1)[0]
@@ -399,8 +396,8 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_battery(payload: bytes) -> dict:
         """Parse BATTERY (0x0C) response."""
-        if len(payload) < 2:
-            return {"level": 0}
+        if len(payload) < 2 or 2 < len(payload) < 10:
+            raise ValueError("Truncated BATTERY payload")
         level = int.from_bytes(payload[:2], "little")
         result = {"level": level}
         if len(payload) >= 10:
@@ -432,7 +429,7 @@ class MeshCoreRawConnection:
         bytes follow it.  Same bug as parse_channel_msg: the old code read phantom
         path bytes that consumed txt_type, timestamp, and the start of the message.
         """
-        min_len = 12 if is_v3 else 11  # Minimum length accounting for V3 vs standard
+        min_len = 15 if is_v3 else 12
         if len(payload) < min_len:
             raise ValueError(f"CONTACT_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
 
@@ -452,10 +449,9 @@ class MeshCoreRawConnection:
         msg["txt_type"] = buf.read(1)[0]
         msg["sender_timestamp"] = int.from_bytes(buf.read(4), "little")
         if msg["txt_type"] == 2:
-            if buf.tell() + 4 <= len(payload):  # Check if we have enough bytes for signature
-                msg["signature"] = buf.read(4).hex()
-            else:
-                msg["signature"] = ""
+            if len(payload) < min_len + 4:
+                raise ValueError("Truncated CONTACT_MSG signature")
+            msg["signature"] = buf.read(4).hex()
         msg["text"] = buf.read().decode("utf-8", "ignore")
         return msg
 
@@ -472,7 +468,7 @@ class MeshCoreRawConnection:
         as path data, consuming txt_type, timestamp, and the start of the message
         text (butchering sender names like ADL-HANDHELD → HELD/NDHELD).
         """
-        min_len = 8 if is_v3 else 7  # Minimum length accounting for V3 vs standard
+        min_len = 10 if is_v3 else 7
         if len(payload) < min_len:
             raise ValueError(f"CHANNEL_MSG payload too short: {len(payload)} bytes, expected at least {min_len}")
 
@@ -497,8 +493,8 @@ class MeshCoreRawConnection:
     @staticmethod
     def parse_contact(payload: bytes) -> dict:
         """Parse CONTACT (0x03) entry."""
-        if len(payload) < 41:  # Minimum expected length
-            raise ValueError(f"CONTACT payload too short: {len(payload)} bytes, expected at least 41")
+        if len(payload) < 147:
+            raise ValueError(f"CONTACT payload too short: {len(payload)} bytes, expected at least 147")
 
         buf = io.BytesIO(payload)
         c = {}
@@ -526,11 +522,11 @@ class MeshCoreRawConnection:
     def parse_channel_info(payload: bytes) -> dict:
         """Parse CHANNEL_INFO (0x12) response.
 
-        Format: 1-byte channel_idx + null-terminated name (max 32 bytes)
+        Format: 1-byte channel_idx + fixed 32-byte name field
         + 16-byte channel secret.
         """
-        if len(payload) < 1:  # Need at least the channel index
-            raise ValueError(f"CHANNEL_INFO payload too short: {len(payload)} bytes, expected at least 1")
+        if len(payload) < 49:
+            raise ValueError(f"CHANNEL_INFO payload too short: {len(payload)} bytes, expected at least 49")
 
         buf = io.BytesIO(payload)
         info = {"channel_idx": buf.read(1)[0]}
@@ -548,9 +544,14 @@ class MeshCoreRawConnection:
     def parse_stats(payload: bytes) -> dict:
         """Parse STATS (0x18) response."""
         if len(payload) < 1:
-            return {}
+            raise ValueError("Missing STATS type")
         stats_type = payload[0]
         data = payload[1:]
+        minimum = {0: 9, 1: 12, 2: 24}.get(stats_type)
+        if minimum is not None and len(data) < minimum:
+            raise ValueError("Truncated STATS payload")
+        if stats_type == 2 and 24 < len(data) < 28:
+            raise ValueError("Truncated STATS receive error counter")
         if stats_type == 0:  # core
             if len(data) >= 9:
                 try:
@@ -822,7 +823,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return
 
         # CONTACT_START gives us the count
-        contact_nb = int.from_bytes(payload[:4], "little") if len(payload) >= 4 else 0
+        if len(payload) < 4:
+            raise ValueError("Truncated CONTACT_START payload")
+        contact_nb = int.from_bytes(payload[:4], "little")
 
         contacts = {}
         for _ in range(contact_nb):
@@ -1045,6 +1048,10 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     "success": False,
                     "error": "Password-bearing IPC requests are not supported",
                 }
+            elif not self.admin_nodes and not self.admin_channels:
+                result = {"success": False, "error": "Admin queries are not authorized"}
+            elif not all(isinstance(value, str) and value for value in (node, command, request_id)):
+                result = {"success": False, "error": "Invalid admin query fields"}
             else:
                 logger.info(
                     "MeshCore: processing admin request %s: %s → %s",
@@ -1106,9 +1113,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             "uptime_s": core.get("uptime_secs"),
             "errors": core.get("errors"),
             "queue_len": core.get("queue_len"),
-            "noise": radio.get("noise_floor"),
-            "rssi": radio.get("last_rssi"),
-            "snr": radio.get("last_snr"),
+            "noise": radio.get("noise_floor_dbm"),
+            "rssi": radio.get("last_rssi_dbm"),
+            "snr": radio.get("last_snr_db"),
             "tx_packets": packets.get("sent"),
             "rx_packets": packets.get("recv"),
         }
@@ -1824,7 +1831,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
         Uses the same field layout as meshcore_py's parse_status() with offset=8.
         """
         if len(payload) < 60:
-            return f"[STATUS] (too short: {len(payload)} bytes) {payload.hex()}"
+            raise ValueError("Truncated STATUS response")
+        if 60 < len(payload) < 64:
+            raise ValueError("Truncated STATUS receive error counter")
         # Fields start at offset 8 (skip 4-byte tag + 4-byte timestamp)
         d = payload
         bat = int.from_bytes(d[8:10], "little")
@@ -1871,7 +1880,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         For STATUS requests, response_data uses parse_status() with offset=0.
         """
         if len(payload) < 5:
-            return f"[BINARY] (too short: {len(payload)} bytes) {payload.hex()}"
+            raise ValueError("Truncated BINARY response header")
         tag = payload[1:5].hex()
         response_data = payload[5:]
 
@@ -1884,6 +1893,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 pass  # Fall through to raw hex
         # Try parsing as status (most common binary response type)
         if len(response_data) >= 52:
+            if 52 < len(response_data) < 56:
+                raise ValueError("Truncated BINARY status receive error counter")
             d = response_data
             bat = int.from_bytes(d[0:2], "little")
             tx_queue = int.from_bytes(d[2:4], "little")
@@ -1932,9 +1943,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
           pk_plen bytes pubkey prefix, 4B secs_ago, 1B snr/4
         """
         import io
+        if len(response_data) < 4 or not 1 <= pubkey_prefix_length <= 32:
+            raise ValueError("Invalid NEIGHBOURS header")
+        total, count = struct.unpack_from("<HH", response_data)
+        if count > total or len(response_data) < 4 + count * (pubkey_prefix_length + 5):
+            raise ValueError("Truncated or invalid NEIGHBOURS entries")
         bbuf = io.BytesIO(response_data)
-        total = int.from_bytes(bbuf.read(2), "little", signed=True)
-        count = int.from_bytes(bbuf.read(2), "little", signed=True)
+        bbuf.read(4)
         lines = [f"=== {pubkey_prefix} Neighbours ===",
                  f"Total: {total}  |  In response: {count}"]
         for i in range(count):
@@ -2296,9 +2311,9 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
     A password can only be used through ``meshcore_admin`` in the gateway
     process, where it remains in memory. Cross-process IPC rejects it.
     """
-    auth_error = _check_admin_auth()
-    if auth_error is not None:
-        return auth_error
+    # Source authorization is enforced by the admin toolset. The receiving
+    # gateway independently checks its admin configuration and command allowlist.
+    # A separate submitting session has no in-process adapter singleton.
     if password:
         return json.dumps({
             "success": False,

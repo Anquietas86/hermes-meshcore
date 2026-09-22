@@ -3,7 +3,11 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hermes_source="${HERMES_SOURCE_ROOT:-${HOME}/.hermes/hermes-agent}"
-python_bin="${HERMES_PYTHON:-${hermes_source}/venv/bin/python}"
+python_bin="${HERMES_PYTHON:-${hermes_source}/venv/bin/python3}"
+python_bin="$(command -v -- "${python_bin}")" || {
+    printf 'Python executable not found; set HERMES_PYTHON.\n' >&2
+    exit 2
+}
 
 if [[ ! -x "${python_bin}" || ! -d "${hermes_source}/gateway" ]]; then
     printf 'Hermes venv/source layout not found; set HERMES_SOURCE_ROOT or HERMES_PYTHON.\n' >&2
