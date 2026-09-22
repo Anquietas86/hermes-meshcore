@@ -40,6 +40,7 @@ from gateway.platforms.base import (
     MessageType,
 )
 from gateway.config import Platform
+from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
 
 # ── Protocol constants ────────────────────────────────────────────────────
@@ -548,29 +549,29 @@ class MeshCoreAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=platform)
         extra = getattr(config, "extra", {}) or {}
 
-        self.host = os.getenv("MESHCORE_HOST") or extra.get("host", "")
-        self.port = int(os.getenv("MESHCORE_PORT") or extra.get("port", 5000))
-        self.bot_name = os.getenv("MESHCORE_BOT_NAME") or extra.get("bot_name", "meshcore-bot")  # fallback
+        self.host = _get_scoped_secret("MESHCORE_HOST", "") or extra.get("host", "")
+        self.port = int(_get_scoped_secret("MESHCORE_PORT", "") or extra.get("port", 5000))
+        self.bot_name = _get_scoped_secret("MESHCORE_BOT_NAME", "") or extra.get("bot_name", "meshcore-bot")  # fallback
 
         # Packet-level debug logging — set MESHCORE_DEBUG=true to see every frame
-        debug_raw = os.getenv("MESHCORE_DEBUG") or extra.get("debug", "")
+        debug_raw = _get_scoped_secret("MESHCORE_DEBUG", "") or extra.get("debug", "")
         self.debug_enabled = debug_raw.lower() in {"1", "true", "yes"}
         if self.debug_enabled:
             logger.setLevel(logging.INFO)
             logger.info("MeshCore: packet debugging ENABLED — all send/recv frames will be logged")
 
-        admin_raw = os.getenv("MESHCORE_ADMIN_NODES") or extra.get("admin_nodes", "")
+        admin_raw = _get_scoped_secret("MESHCORE_ADMIN_NODES", "") or extra.get("admin_nodes", "")
         self.admin_nodes: Set[str] = {n.strip() for n in admin_raw.split(",") if n.strip()}
 
-        channels_raw = os.getenv("MESHCORE_MONITOR_CHANNELS") or extra.get("monitor_channels", "")
+        channels_raw = _get_scoped_secret("MESHCORE_MONITOR_CHANNELS", "") or extra.get("monitor_channels", "")
         self.monitor_channels: Optional[Set[int]] = None
         if channels_raw.strip():
             self.monitor_channels = {int(c.strip()) for c in channels_raw.split(",") if c.strip().isdigit()}
 
-        enable_dms = os.getenv("MESHCORE_ENABLE_DMS") or extra.get("enable_dms", "true")
+        enable_dms = _get_scoped_secret("MESHCORE_ENABLE_DMS", "") or extra.get("enable_dms", "true")
         self.enable_dms = enable_dms.lower() in {"1", "true", "yes"}
 
-        require_mention_raw = os.getenv("MESHCORE_REQUIRE_MENTION") or extra.get("require_mention", "")
+        require_mention_raw = _get_scoped_secret("MESHCORE_REQUIRE_MENTION", "") or extra.get("require_mention", "")
         # Per-channel: comma-separated channel indexes that require @mention.
         # Empty = all channels free-for-all. "true"/"1" = all channels require mention (legacy).
         if require_mention_raw.lower() in {"true", "1", "yes"}:
@@ -580,12 +581,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         else:
             self.require_mention_channels = set()  # empty set = no channels require mention
 
-        admin_channels_raw = os.getenv("MESHCORE_ADMIN_CHANNELS") or extra.get("admin_channels", "")
+        admin_channels_raw = _get_scoped_secret("MESHCORE_ADMIN_CHANNELS", "") or extra.get("admin_channels", "")
         self.admin_channels: Set[int] = {int(c.strip()) for c in admin_channels_raw.split(",") if c.strip().isdigit()}
 
-        allowed_raw = os.getenv("MESHCORE_ALLOWED_USERS") or extra.get("allowed_users", "")
+        allowed_raw = _get_scoped_secret("MESHCORE_ALLOWED_USERS", "") or extra.get("allowed_users", "")
         self.allowed_users: Set[str] = {u.strip() for u in allowed_raw.split(",") if u.strip()}
-        self.allow_all: bool = os.getenv("MESHCORE_ALLOW_ALL_USERS", "").lower() == "true"
+        self.allow_all: bool = _get_scoped_secret("MESHCORE_ALLOW_ALL_USERS", "").lower() == "true"
 
         self._conn: Optional[MeshCoreRawConnection] = None
         self._contacts: Dict[str, dict] = {}
@@ -2242,32 +2243,32 @@ async def _handle_meshcore_contact(name: str) -> str:
 # ── Plugin registration ───────────────────────────────────────────────────
 
 def check_requirements():
-    return bool(os.getenv("MESHCORE_HOST", ""))
+    return bool(_get_scoped_secret("MESHCORE_HOST", "").strip())
 
 def validate_config(config):
     extra = getattr(config, "extra", {}) or {}
-    return bool(os.getenv("MESHCORE_HOST") or extra.get("host", ""))
+    return bool(_get_scoped_secret("MESHCORE_HOST", "").strip() or extra.get("host", ""))
 
 def is_connected(config):
     extra = getattr(config, "extra", {}) or {}
-    return bool(os.getenv("MESHCORE_HOST") or extra.get("host", ""))
+    return bool(_get_scoped_secret("MESHCORE_HOST", "").strip() or extra.get("host", ""))
 
 def _env_enablement():
-    host = os.getenv("MESHCORE_HOST", "").strip()
+    host = _get_scoped_secret("MESHCORE_HOST", "").strip()
     if not host:
         return None
     seed = {"host": host}
     for key in ["MESHCORE_PORT", "MESHCORE_BOT_NAME", "MESHCORE_ADMIN_NODES",
                 "MESHCORE_MONITOR_CHANNELS", "MESHCORE_ENABLE_DMS",
                 "MESHCORE_REQUIRE_MENTION", "MESHCORE_ALLOWED_USERS"]:
-        val = os.getenv(key, "").strip()
+        val = _get_scoped_secret(key, "").strip()
         if val:
             name = key.replace("MESHCORE_", "").lower()
             try:
                 seed[name] = int(val)
             except ValueError:
                 seed[name] = val
-    home = os.getenv("MESHCORE_HOME_CHANNEL", "").strip()
+    home = _get_scoped_secret("MESHCORE_HOME_CHANNEL", "").strip()
     if home:
         # Support both dm:pubkey and numeric channel index
         if home.startswith("dm:"):
@@ -2315,7 +2316,7 @@ def register(ctx):
         adapter_factory=lambda cfg: MeshCoreAdapter(cfg),
         check_fn=check_requirements, validate_config=validate_config,
         is_connected=is_connected, required_env=["MESHCORE_HOST"],
-        install_hint="pip install meshcore", setup_fn=interactive_setup,
+        install_hint="MeshCore uses the plugin's raw stdlib protocol adapter; no external package is required.", setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="MESHCORE_HOME_CHANNEL",
         allowed_users_env="MESHCORE_ALLOWED_USERS",
