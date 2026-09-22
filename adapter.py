@@ -609,8 +609,22 @@ def _parse_channel_index(chat_id: str) -> Optional[int]:
 class MeshCoreAdapter(BasePlatformAdapter):
     """MeshCore adapter using raw binary protocol — no meshcore_py."""
 
-    # Singleton ref for tool handlers (set in connect(), cleared in disconnect())
-    _instance: Optional["MeshCoreAdapter"] = None
+    # Per-profile adapter registry for multiplex gateway support.
+    # Keyed by profile directory path. The old _instance singleton only
+    # supported ONE adapter per process — multiplex profiles each get their own.
+    _instances: Dict[str, "MeshCoreAdapter"] = {}
+
+    @classmethod
+    def _find_adapter(cls) -> Optional["MeshCoreAdapter"]:
+        """Return the adapter for the active profile, or any connected adapter as fallback."""
+        # Try the active profile's home directory
+        profile_home = os.environ.get("HERMES_HOME", "").strip()
+        if profile_home and profile_home in cls._instances:
+            return cls._instances[profile_home]
+        # Fall back to any connected adapter (non-multiplex / single-profile)
+        for adapter in cls._instances.values():
+            return adapter
+        return None
 
     def __init__(self, config, **kwargs):
         platform = Platform("meshcore")
@@ -796,8 +810,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
             pass
 
         self._mark_connected()
-        # Set class-level singleton for tool handlers
-        MeshCoreAdapter._instance = self
+        # Register in per-profile adapter registry for multiplex support
+        MeshCoreAdapter._instances[str(self._profile_dir)] = self
         logger.info("MeshCore: connected (raw protocol), channels=%s, DMs=%s",
                     sorted(self.monitor_channels) if self.monitor_channels else "(discovery)",
                     "on" if self.enable_dms else "off")
@@ -813,7 +827,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._stop_keepalive()
         self._stop_poll()
         self._mark_disconnected()
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.pop(str(self._profile_dir), None)
         if self._conn:
             try:
                 await self._conn.disconnect()
@@ -2283,7 +2297,7 @@ def _check_admin_auth() -> Optional[str]:
     the primary enforcement is toolsets_for_source, which prevents
     non-admin sources from ever receiving the admin tool schemas.
     """
-    adapter = MeshCoreAdapter._instance
+    adapter = MeshCoreAdapter._find_adapter()
     if adapter is None:
         return json.dumps({"success": False, "error": (
             "MeshCore gateway not connected — admin tools require the gateway to be running"
@@ -2302,7 +2316,7 @@ async def _handle_meshcore_admin(node: str, command: str, password: str = "") ->
     auth_error = _check_admin_auth()
     if auth_error is not None:
         return auth_error
-    adapter = MeshCoreAdapter._instance
+    adapter = MeshCoreAdapter._find_adapter()
     if command == "all":
         all_results = {}
         for cmd in ALL_READONLY_COMMANDS:
@@ -2390,7 +2404,7 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
 async def _handle_meshcore_contact(name: str) -> str:
     """Handler for meshcore_contact tool. Requires the gateway adapter to be
     connected — reads from the gateway's contact cache."""
-    adapter = MeshCoreAdapter._instance
+    adapter = MeshCoreAdapter._find_adapter()
     if adapter is None:
         return json.dumps({"success": False, "error": "MeshCore gateway not connected — contact lookup requires the gateway to be running"})
 
@@ -2427,6 +2441,10 @@ def _env_enablement():
                 seed[name] = int(val)
             except ValueError:
                 seed[name] = val
+    # Auto-seed the profile directory from Hermes multiplex context
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        seed["profile_dir"] = hermes_home
     home = _get_scoped_secret("MESHCORE_HOME_CHANNEL", "").strip()
     if home:
         # Support both dm:pubkey and numeric channel index

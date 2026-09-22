@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.11.0
+
+- Support Hermes singular multiplexed gateways with a per-profile adapter registry.
+- Remove the process-wide MeshCore adapter singleton that prevented multiple profiles.
+- Resolve the active adapter by profile context for tool handlers.
+- Derive profile-scoped IPC state from `HERMES_HOME` when `HERMES_PROFILE_DIR` is not explicitly set.
+- Align the dashboard manifest version with the plugin release.
+
 ## 1.10.1
 
 - Fix package-relative `meshcore_utils` imports when Hermes loads the plugin as a package.

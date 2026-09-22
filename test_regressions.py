@@ -165,7 +165,7 @@ def test_passwordless_ipc_without_local_singleton():
             await obj._process_admin_request()
 
         with patch.object(adapter, "get_profile_scoped_dir", return_value=directory), \
-                patch.object(MeshCoreAdapter, "_instance", None), \
+                patch.object(MeshCoreAdapter, "_instances", {}), \
                 patch.object(adapter.asyncio, "sleep", side_effect=gateway_tick):
             result = json.loads(await adapter._handle_meshcore_admin_query("node", "ver"))
             assert result["success"] is True and result["responses"] == ["ok"]

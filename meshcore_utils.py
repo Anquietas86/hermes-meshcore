@@ -18,6 +18,9 @@ def get_profile_scoped_dir():
     accidentally sharing IPC files through a global or default-profile path.
     """
     raw_profile_dir = os.environ.get("HERMES_PROFILE_DIR", "").strip()
+    # Under a multiplexed gateway the profile's HOME is set; fall back to it
+    if not raw_profile_dir:
+        raw_profile_dir = os.environ.get("HERMES_HOME", "").strip()
     if not raw_profile_dir:
         raise RuntimeError("HERMES_PROFILE_DIR is required for MeshCore IPC")
 

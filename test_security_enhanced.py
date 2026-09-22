@@ -37,6 +37,7 @@ def test_get_profile_scoped_dir():
 def test_profile_resolution_fails_closed_without_environment():
     """Profile-scoped IPC must never fall back to a global path."""
     original = os.environ.pop("HERMES_PROFILE_DIR", None)
+    original_home = os.environ.pop("HERMES_HOME", None)
     try:
         try:
             get_profile_scoped_dir()
@@ -46,6 +47,8 @@ def test_profile_resolution_fails_closed_without_environment():
     finally:
         if original is not None:
             os.environ["HERMES_PROFILE_DIR"] = original
+        if original_home is not None:
+            os.environ["HERMES_HOME"] = original_home
 
 
 def test_profile_scoped_file_paths():

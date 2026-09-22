@@ -116,7 +116,7 @@ def test_toolsets_parse_failure_fail_closed():
 # ── Unit: defense-in-depth auth check ──────────────────────────────
 
 def test_check_admin_auth_no_instance():
-    MeshCoreAdapter._instance = None
+    MeshCoreAdapter._instances.clear()
     result = _check_admin_auth()
     assert result is not None
     parsed = json.loads(result)
@@ -126,7 +126,7 @@ def test_check_admin_auth_no_instance():
 
 def test_check_admin_auth_no_admin_config():
     adapter = _make_adapter()
-    MeshCoreAdapter._instance = adapter
+    MeshCoreAdapter._instances.clear(); MeshCoreAdapter._instances["test"] = adapter
     try:
         result = _check_admin_auth()
         assert result is not None
@@ -134,23 +134,23 @@ def test_check_admin_auth_no_admin_config():
         assert parsed["success"] is False
         assert "not authorized" in parsed["error"]
     finally:
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.clear()
 
 
 def test_check_admin_auth_authorized():
     adapter = _make_adapter(admin_nodes={"abc"})
-    MeshCoreAdapter._instance = adapter
+    MeshCoreAdapter._instances.clear(); MeshCoreAdapter._instances["test"] = adapter
     try:
         result = _check_admin_auth()
         assert result is None
     finally:
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.clear()
 
 
 # ── Unit: handler auth gate ────────────────────────────────────────
 
 def test_admin_handler_rejected_no_instance():
-    MeshCoreAdapter._instance = None
+    MeshCoreAdapter._instances.clear()
     try:
         import asyncio
         result = asyncio.run(
@@ -160,12 +160,12 @@ def test_admin_handler_rejected_no_instance():
         assert parsed["success"] is False
         assert "not connected" in parsed["error"]
     finally:
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.clear()
 
 
 def test_admin_handler_rejected_no_admin_config():
     adapter = _make_adapter()
-    MeshCoreAdapter._instance = adapter
+    MeshCoreAdapter._instances.clear(); MeshCoreAdapter._instances["test"] = adapter
     try:
         import asyncio
         result = asyncio.run(
@@ -175,12 +175,12 @@ def test_admin_handler_rejected_no_admin_config():
         assert parsed["success"] is False
         assert "not authorized" in parsed["error"]
     finally:
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.clear()
 
 
 def test_admin_query_handler_requires_running_gateway():
     """A separate session checks gateway state, not a local singleton."""
-    MeshCoreAdapter._instance = None
+    MeshCoreAdapter._instances.clear()
     import asyncio
     from unittest.mock import patch
     from tempfile import TemporaryDirectory
@@ -195,7 +195,7 @@ def test_admin_query_handler_requires_running_gateway():
 def test_admin_query_rejects_password_bearing_ipc():
     """Cross-process admin queries must not accept a password."""
     instance = _make_adapter(admin_nodes={"admin-node"})
-    MeshCoreAdapter._instance = instance
+    MeshCoreAdapter._instances.clear(); MeshCoreAdapter._instances["test"] = instance
     try:
         import asyncio
         result = asyncio.run(
@@ -207,12 +207,12 @@ def test_admin_query_rejects_password_bearing_ipc():
         assert parsed["success"] is False
         assert "not supported" in parsed["error"]
     finally:
-        MeshCoreAdapter._instance = None
+        MeshCoreAdapter._instances.clear()
 
 
 def test_contact_handler_no_auth_required():
     """meshcore_contact should remain accessible — no admin auth required."""
-    MeshCoreAdapter._instance = None
+    MeshCoreAdapter._instances.clear()
     import asyncio
     result = asyncio.run(
         _handle_meshcore_contact("test-node")
