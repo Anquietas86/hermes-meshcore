@@ -41,13 +41,22 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
-from meshcore_utils import (
-    get_profile_scoped_dir,
-    secure_write_json,
-    secure_read_json,
-    secure_remove,
-    generate_request_id
-)
+if __package__:
+    from .meshcore_utils import (
+        get_profile_scoped_dir,
+        secure_write_json,
+        secure_read_json,
+        secure_remove,
+        generate_request_id,
+    )
+else:  # Standalone test runner imports adapter as a top-level module.
+    from meshcore_utils import (
+        get_profile_scoped_dir,
+        secure_write_json,
+        secure_read_json,
+        secure_remove,
+        generate_request_id,
+    )
 
 
 # ── Protocol constants ────────────────────────────────────────────────────
