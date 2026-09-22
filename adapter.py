@@ -538,6 +538,16 @@ class MeshCoreRawConnection:
 
 # ── MeshCore Adapter ──────────────────────────────────────────────────────
 
+def _parse_channel_index(chat_id: str) -> Optional[int]:
+    """Extract channel index from a chat_id like ``"channel:3"`` or ``"channel:7"``."""
+    try:
+        if chat_id.startswith("channel:"):
+            return int(chat_id.split(":", 1)[1])
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
 class MeshCoreAdapter(BasePlatformAdapter):
     """MeshCore adapter using raw binary protocol — no meshcore_py."""
 
@@ -616,6 +626,32 @@ class MeshCoreAdapter(BasePlatformAdapter):
     @property
     def name(self) -> str:
         return "MeshCore"
+
+    def toolsets_for_source(self, source) -> Optional[List[str]]:
+        """Per-source toolset override for MeshCore.
+
+        Admin nodes in DM and admin channels get the full ``meshcore_admin``
+        toolset plus the safe ``meshcore`` toolset. All other sources
+        receive only ``meshcore`` (contact lookup). Fail-closed: any
+        parse error or unrecognised source defaults to restricted.
+        """
+        try:
+            chat_type = getattr(source, "chat_type", "")
+            if chat_type == "dm":
+                user_id = getattr(source, "user_id", "") or ""
+                if user_id in self.admin_nodes:
+                    return ["meshcore", "meshcore_admin"]
+                return ["meshcore"]
+            if chat_type in ("group", "channel"):
+                chat_id = getattr(source, "chat_id", "") or ""
+                idx = _parse_channel_index(chat_id)
+                if idx is not None and idx in self.admin_channels:
+                    return ["meshcore", "meshcore_admin"]
+                return ["meshcore"]
+        except Exception:
+            logger.warning("MeshCore: toolsets_for_source failed — falling back to restricted", exc_info=True)
+        # Fail closed: return only the safe toolset.
+        return ["meshcore"]
 
     # ── Connection lifecycle ──────────────────────────────────────────────
 
@@ -1972,12 +2008,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
                     logger.debug("MeshCore: admin query sending binary req: opcode=0x%02x sub=0x%02x",
                                  cmd_opcode, sub_type)
                 else:
-                    # Fallback: text DM (will likely get "Unknown command")
-                    ts = int(time.time())
-                    cmd_bytes = bytes([CMD_SEND_TXT_MSG, 1, 0]) + \
-                                ts.to_bytes(4, "little") + full_key[:6] + command.encode("utf-8")
-                    logger.debug("MeshCore: admin query sending text cmd (no binary mapping): %s",
-                                 cmd_bytes.hex()[:40])
+                    return {"success": False, "error": f"Unknown command: {command!r}. "
+                            "Only documented read-only commands are accepted. "
+                            "Supported: " + ", ".join(sorted(BINARY_COMMAND_MAP.keys()))}
 
                 logger.debug("MeshCore: admin query cmd bytes: %s", cmd_bytes.hex()[:60])
                 try:
@@ -2149,13 +2182,35 @@ ALL_READONLY_COMMANDS = [
 ]
 
 
+def _check_admin_auth() -> Optional[str]:
+    """Defense-in-depth admin authorization check.
+
+    Returns None if admin access is authorized (admin nodes or admin
+    channels are configured and the gateway adapter is connected), or an
+    error string for the caller to return. This is a secondary gate —
+    the primary enforcement is toolsets_for_source, which prevents
+    non-admin sources from ever receiving the admin tool schemas.
+    """
+    adapter = MeshCoreAdapter._instance
+    if adapter is None:
+        return json.dumps({"success": False, "error": (
+            "MeshCore gateway not connected — admin tools require the gateway to be running"
+        )})
+    if not adapter.admin_nodes and not adapter.admin_channels:
+        return json.dumps({"success": False, "error": (
+            "Admin tools are not authorized for this source. "
+            "Configure MESHCORE_ADMIN_NODES or MESHCORE_ADMIN_CHANNELS."
+        )})
+    return None
+
+
 async def _handle_meshcore_admin(node: str, command: str, password: str = "") -> str:
     """Handler for meshcore_admin tool. Requires the gateway adapter to be
     connected — uses the gateway's existing TCP connection."""
+    auth_error = _check_admin_auth()
+    if auth_error is not None:
+        return auth_error
     adapter = MeshCoreAdapter._instance
-    if adapter is None:
-        return json.dumps({"success": False, "error": "MeshCore gateway not connected — admin tools require the gateway to be running"})
-
     if command == "all":
         all_results = {}
         for cmd in ALL_READONLY_COMMANDS:
@@ -2171,6 +2226,10 @@ async def _handle_meshcore_admin_query(node: str, command: str, password: str = 
     """Handler for meshcore_admin_query tool. Uses the file-based request/response
     mechanism — writes a request file that the gateway's keepalive loop picks up,
     then polls for the response. Works from any session, not just the gateway process."""
+    auth_error = _check_admin_auth()
+    if auth_error is not None:
+        return auth_error
+
     import os
     import json
     import time
@@ -2261,7 +2320,8 @@ def _env_enablement():
     seed = {"host": host}
     for key in ["MESHCORE_PORT", "MESHCORE_BOT_NAME", "MESHCORE_ADMIN_NODES",
                 "MESHCORE_MONITOR_CHANNELS", "MESHCORE_ENABLE_DMS",
-                "MESHCORE_REQUIRE_MENTION", "MESHCORE_ALLOWED_USERS"]:
+                "MESHCORE_REQUIRE_MENTION", "MESHCORE_ALLOWED_USERS",
+                "MESHCORE_ADMIN_CHANNELS"]:
         val = _get_scoped_secret(key, "").strip()
         if val:
             name = key.replace("MESHCORE_", "").lower()
@@ -2330,10 +2390,10 @@ def register(ctx):
         ),
     )
 
-    # Register admin tools
+    # Register admin tools (meshcore_admin toolset — admin-only)
     ctx.register_tool(
         name="meshcore_admin",
-        toolset="meshcore",
+        toolset="meshcore_admin",
         schema=MESHCORE_ADMIN_SCHEMA,
         handler=lambda args, **kw: _handle_meshcore_admin(
             node=args.get("node", ""),
@@ -2353,7 +2413,7 @@ def register(ctx):
     )
     ctx.register_tool(
         name="meshcore_admin_query",
-        toolset="meshcore",
+        toolset="meshcore_admin",
         schema={
             "name": "meshcore_admin_query",
             "description": (
