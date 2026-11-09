@@ -12,6 +12,7 @@ runs as a detached subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import os
 import re
@@ -38,15 +39,56 @@ def _load_state_module():
 
 
 state = _load_state_module()
+_active_home = state.hermes_home
+
+
+def _meshcore_home() -> Path:
+    """The profile home whose gateway runs MeshCore.
+
+    The dashboard's active profile is used when it has MeshCore state. Many
+    installs run the mesh bot in its own profile (``hermes -p meshcore``)
+    while the dashboard sits on the default one, so otherwise we look through
+    the default home and every profile, and pick the one whose gateway wrote
+    its status most recently.
+    """
+    active = Path(_active_home())
+    if (active / state.STATE_DIR_NAME / state.STATE_FILE).exists():
+        return active
+    root = active.parent.parent if active.parent.name == "profiles" else active
+    candidates = [root]
+    try:
+        candidates += sorted(p for p in (root / "profiles").iterdir() if p.is_dir())
+    except OSError:
+        pass
+    best, best_mtime = active, -1.0
+    for home in candidates:
+        try:
+            mtime = (home / state.STATE_DIR_NAME / state.STATE_FILE).stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best, best_mtime = home, mtime
+    return best
+
+
+# Every state/IPC/.env path in this module goes through state.hermes_home();
+# this is the dashboard's own copy of the module, so the gateway is unaffected.
+state.hermes_home = _meshcore_home
 router = APIRouter()
 
 _HEX_LIST = re.compile(r"^(?:[0-9a-fA-F]{8,64})(?:,[0-9a-fA-F]{8,64})*$")
 _INT_LIST = re.compile(r"^(?:\d{1,3})(?:,\d{1,3})*$")
 _CHAT_LIST = re.compile(r"^(?:channel:\d{1,3})(?:,channel:\d{1,3})*$")
 _BOOL = {"true", "false"}
+_HOST = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[?[0-9A-Fa-f:.]{2,45}\]?"
+                   r"|serial:/dev/[A-Za-z0-9._/-]{1,100})$")
+_PORT = re.compile(r"^(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$")
+_KEEP_CASE = {"host"}  # serial device paths are case-sensitive
 
 # dashboard key -> (env var, validator, normaliser)
 CONFIG_FIELDS: Dict[str, tuple] = {
+    "host": ("MESHCORE_HOST", _HOST),
+    "port": ("MESHCORE_PORT", _PORT),
     "admin_nodes": ("MESHCORE_ADMIN_NODES", _HEX_LIST),
     "allowed_users": ("MESHCORE_ALLOWED_USERS", _HEX_LIST),
     "admin_channels": ("MESHCORE_ADMIN_CHANNELS", _INT_LIST),
@@ -87,7 +129,8 @@ def _validate(key: str, value: Any) -> str:
     text = re.sub(r"\s+", "", str(value if value is not None else ""))
     if text == "":
         return ""
-    text = text.lower()
+    if key not in _KEEP_CASE:
+        text = text.lower()
     ok = text in rule if isinstance(rule, set) else bool(rule.match(text))
     if not ok:
         raise HTTPException(status_code=400, detail=f"Invalid value for {key}")
@@ -132,6 +175,8 @@ def _current_config() -> Dict[str, str]:
 def _public_state() -> Dict[str, Any]:
     snap = state.read_state()
     snap.pop("contacts_list", None)
+    home = _meshcore_home()
+    snap["profile"] = home.name if home.parent.name == "profiles" else "default"
     return snap
 
 
@@ -191,6 +236,67 @@ async def update_config(request: Request):
         raise HTTPException(status_code=400, detail="No config keys provided")
     await asyncio.to_thread(_write_env, updates)
     return JSONResponse({"success": True, "config": _current_config(), "restart_required": True})
+
+
+def _load_protocol_module():
+    name = "hermes_meshcore_dashboard_protocol"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, _PLUGIN_ROOT / "protocol.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+@router.post("/test-connection")
+async def test_connection(request: Request):
+    """Try the node from the dashboard: TCP connect + APP_START, then disconnect.
+
+    Refused while the gateway holds the link, because the companion firmware
+    serves one client at a time and a test would knock the gateway off.
+    """
+    body = await _json_body(request)
+    snap = state.read_state()
+    if snap.get("connected"):
+        return JSONResponse({"success": True, "skipped": True,
+                             "message": f"The gateway is connected to {snap.get('host')}:{snap.get('port')} right now"})
+    saved = _current_config()
+    host = _validate("host", body.get("host", saved.get("host", "")))
+    port = int(_validate("port", body.get("port", saved.get("port", ""))) or 5000)
+    if not host:
+        raise HTTPException(status_code=400, detail="No host set")
+    if host.startswith("serial:"):
+        raise HTTPException(status_code=400, detail="The connection test only works for TCP nodes")
+    p = _load_protocol_module()
+    client = p.MeshCoreClient(host, port)
+    started = asyncio.get_running_loop().time()
+    try:
+        await client.open(timeout=8)
+        reply = await client.request(p.cmd_app_start(), [p.RESP_SELF_INFO], timeout=6)
+        if reply.code != p.RESP_SELF_INFO:
+            raise p.MeshCoreError(f"APP_START failed: {reply.error_text()}")
+        info = p.parse_self_info(reply.body)
+    except Exception as exc:  # noqa: BLE001 - reported to the user
+        return JSONResponse({"success": False, "host": host, "port": port, "error": _explain(p, exc)})
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
+    return JSONResponse({"success": True, "host": host, "port": port, "node_name": info.get("name", ""),
+                         "pubkey_prefix": (info.get("public_key") or "")[:12],
+                         "ms": round((asyncio.get_running_loop().time() - started) * 1000)})
+
+
+def _explain(p, exc: BaseException) -> str:
+    if isinstance(exc, p.MeshCoreTimeout):
+        return ("Connected, but the node never answered. Something else is probably connected to it (the "
+                "MeshCore app over WiFi, or an old gateway process), or this port isn't a MeshCore companion.")
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "Timed out. Check the IP address and port, and that the node is on the network."
+    if isinstance(exc, ConnectionRefusedError):
+        return "Connection refused. The address answers, but nothing is listening on that port."
+    if isinstance(exc, OSError):
+        return f"Network error: {exc.strerror or exc}"
+    return str(exc) or type(exc).__name__
 
 
 @router.post("/restart")

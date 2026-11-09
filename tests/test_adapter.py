@@ -75,6 +75,25 @@ class LifecycleTests(AdapterTestBase):
         self.assertTrue(self.adapter.fatal_error_retryable)
         self.assertEqual(gw_status.LOCKS, {})
 
+    async def test_connect_failure_reaches_dashboard_state(self):
+        await self.node.stop()
+        self.assertFalse(await self.adapter.connect())
+        snap = state.read_state()
+        self.assertFalse(snap["connected"])
+        self.assertEqual(snap["last_error"]["code"], "connect_failed")
+        self.assertIn("refused", snap["last_error"]["message"])
+        self.assertEqual(snap["host"], "127.0.0.1")
+
+    def test_describe_error(self):
+        self.assertIn("never answered", A.describe_error(p.MeshCoreTimeout("no reply from node")))
+        self.assertIn("timed out", A.describe_error(asyncio.TimeoutError()))
+        self.assertIn("refused", A.describe_error(ConnectionRefusedError()))
+
+    async def test_success_clears_last_error(self):
+        self.adapter._last_error = {"code": "connect_failed", "message": "x", "at": 1}
+        await self.connect()
+        self.assertIsNone(self.adapter.snapshot()["last_error"])
+
     async def test_missing_host_not_retryable(self):
         self.adapter.settings.host = ""
         self.assertFalse(await self.adapter.connect())

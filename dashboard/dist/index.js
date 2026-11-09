@@ -81,7 +81,10 @@
     return h(Card, { title: "📡 Node" },
       h("span", { className: "mc-badge", style: { background: color + "22", color: color } }, label),
       d.error && h("div", { className: "mc-msg" }, d.error),
+      !ok && d.last_error && h("div", { className: "mc-msg", style: { color: "var(--color-destructive,#dc2626)" } },
+        "Last error (" + ago(d.last_error.at) + "): " + d.last_error.message),
       h(Row, { label: "Gateway", value: d.host ? d.host + ":" + d.port : null, mono: true }),
+      h(Row, { label: "Hermes profile", value: d.profile }),
       h(Row, { label: "Name", value: node.name }),
       h(Row, { label: "Pubkey", value: node.pubkey_prefix, mono: true }),
       h(Row, { label: "Firmware", value: [node.model, node.firmware].filter(Boolean).join(" ") }),
@@ -255,6 +258,10 @@
   }
 
   // ── Settings ──────────────────────────────────────────────────────────
+  var NODE_FIELDS = [
+    { key: "host", label: "Node IP or hostname", hint: "192.168.1.50 (or serial:/dev/ttyUSB0)" },
+    { key: "port", label: "TCP port", hint: "5000" }
+  ];
   var FIELDS = [
     { key: "monitor_channels", label: "Channels to answer in (indexes)", hint: "1,2" },
     { key: "require_mention", label: "Channels that need an @mention", hint: "true = all, or 0,2" },
@@ -280,16 +287,30 @@
       post("/config", edits).then(function (r) { setCfg(r.config); setEdits({}); setMsg("Saved. Restart the gateway to apply."); })
         .catch(function (e) { setMsg("Not saved: " + errText(e)); }).then(function () { setBusy(false); });
     }
+    function test() {
+      setBusy(true); setMsg("Testing connection…");
+      post("/test-connection", { host: val("host"), port: val("port") }).then(function (r) {
+        if (r.skipped) setMsg(r.message + ", so there's nothing to test (and a test would knock it off).");
+        else if (r.success) setMsg("✅ Reached " + (r.node_name || "the node") + " (" + r.pubkey_prefix + ") at " + r.host + ":" + r.port + " in " + r.ms + " ms.");
+        else setMsg("❌ " + r.host + ":" + r.port + ": " + r.error);
+      }).catch(function (e) { setMsg(errText(e)); }).then(function () { setBusy(false); });
+    }
+    function field(f) {
+      return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
+        h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }));
+    }
     function restart() {
       setBusy(true);
       post("/restart").then(function () { setMsg("Restart requested."); })
         .catch(function (e) { setMsg(errText(e)); }).then(function () { setBusy(false); });
     }
     return h(Card, { title: "⚙️ Settings" },
-      FIELDS.map(function (f) {
-        return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
-          h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }));
-      }),
+      h("div", { style: { fontWeight: 600, fontSize: ".85rem", margin: ".25rem 0" } }, "Node connection"),
+      NODE_FIELDS.map(field),
+      h("div", { className: "mc-actions" },
+        h("button", { className: "mc-btn", onClick: test, disabled: busy || !val("host") }, "🔌 Test connection")),
+      h("div", { style: { fontWeight: 600, fontSize: ".85rem", margin: ".75rem 0 .25rem" } }, "Behaviour"),
+      FIELDS.map(field),
       TOGGLES.map(function (t) {
         return h("label", { key: t.key, style: { display: "block", fontSize: ".85rem", margin: ".25rem 0" } },
           h("input", { type: "checkbox", checked: String(val(t.key)).toLowerCase() === "true" || (t.key === "enable_dms" && val(t.key) === ""),

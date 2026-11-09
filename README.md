@@ -66,6 +66,10 @@ Python standard library.
   running gateway's connection.
 - **Dashboard tab.** It shows node status and stats, a searchable contact
   list, a remote repeater query form, and settings with a restart button.
+  The settings include the node's host and port, with a "Test connection"
+  button, and the status card says why the gateway can't connect when it
+  can't. If the bot runs in its own Hermes profile, the dashboard finds it
+  even when the dashboard itself is on the default profile.
   You can also add and remove channels on the node from it. A `#name`
   channel gets its key from the name, like the MeshCore app. A private
   channel takes a 32-hex-char key, or the node gets a new random one, which

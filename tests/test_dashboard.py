@@ -58,7 +58,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_config_rejects_injection_and_unknown_keys(self):
         for body in ({"monitor_channels": "1\nOPENAI_API_KEY=evil"}, {"admin_nodes": "zz"},
-                     {"enable_dms": "maybe"}, {"host": "x"}, {}):
+                     {"enable_dms": "maybe"}, {"debug": "true"}, {}):
             r = self.client.post(self.url("/config"), json=body)
             self.assertEqual(r.status_code, 400, body)
         self.assertFalse(self.env_file.exists())
@@ -97,6 +97,57 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post(self.url("/channels/remove"), json={"index": 0}).status_code, 200)
         listed = self.client.get(self.url("/channels")).json()
         self.assertEqual((listed["channels"], listed["max_channels"]), ({"0": "Public"}, 8))
+
+    def test_node_connection_fields(self):
+        r = self.client.post(self.url("/config"), json={"host": "192.168.1.50", "port": "5000"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("MESHCORE_HOST=192.168.1.50\n", self.env_file.read_text())
+        self.client.post(self.url("/config"), json={"host": "serial:/dev/ttyUSB0"})
+        self.assertEqual(self.client.get(self.url("/config")).json()["host"], "serial:/dev/ttyUSB0")
+        for body in ({"host": "a b;rm"}, {"host": "x\nOPENAI_API_KEY=1"}, {"port": "0"}, {"port": "70000"},
+                     {"port": "50a"}, {"host": "serial:/etc/../x y"}):
+            self.assertEqual(self.client.post(self.url("/config"), json=body).status_code, 400, body)
+
+    def test_connection_test(self):
+        import asyncio
+        import threading
+        import fakenode as fn
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        node = asyncio.run_coroutine_threadsafe(fn.FakeNode().start(), loop).result(5)
+        try:
+            ok = self.client.post(self.url("/test-connection"), json={"host": "127.0.0.1", "port": node.port}).json()
+            self.assertTrue(ok["success"], ok)
+            self.assertEqual(ok["node_name"], "HermesBot")
+            asyncio.run_coroutine_threadsafe(node.stop(), loop).result(5)
+            bad = self.client.post(self.url("/test-connection"), json={"host": "127.0.0.1", "port": node.port}).json()
+            self.assertFalse(bad["success"])
+            self.assertIn("refused", bad["error"])
+            self.api.state.write_state({"connected": True, "host": "127.0.0.1", "port": 5000})
+            busy = self.client.post(self.url("/test-connection"), json={}).json()
+            self.assertTrue(busy["skipped"])
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(5)
+        self.api.state.write_state({"connected": False})
+        self.assertEqual(self.client.post(self.url("/test-connection"), json={}).status_code, 400)
+
+    def test_finds_the_profile_running_meshcore(self):
+        root = Path(self.tmp.name)
+        mesh = root / "profiles" / "meshcore"
+        mesh.mkdir(parents=True)
+        (root / "profiles" / "work").mkdir()
+        self.api.state.write_state({"connected": True, "host": "10.0.0.9", "port": 5000}, mesh)
+        status = self.client.get(self.url("/status")).json()
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["profile"], "meshcore")
+        self.client.post(self.url("/config"), json={"monitor_channels": "3"})
+        self.assertIn("MESHCORE_MONITOR_CHANNELS=3", (mesh / ".env").read_text())
+        self.assertFalse(self.env_file.exists())
+        # Once the active profile has its own MeshCore state, it wins.
+        self.api.state.write_state({"connected": False}, root)
+        self.assertEqual(self.client.get(self.url("/status")).json()["profile"], "default")
 
 
 if __name__ == "__main__":

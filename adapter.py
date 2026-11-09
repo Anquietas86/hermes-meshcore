@@ -20,6 +20,7 @@ import hashlib
 import logging
 import os
 import re
+import socket
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -76,7 +77,7 @@ except TypeError:
     _EVENT_HAS_CONTEXT = False
 
 PLATFORM_NAME = "meshcore"
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 KEEPALIVE_INTERVAL = 30.0
 KEEPALIVE_TIMEOUT = 8.0
@@ -304,6 +305,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._lock_identity: Optional[str] = None
         self._closing = False
         self._failed = False
+        self._last_error: Optional[Dict[str, Any]] = None
         self._connected_at: Optional[float] = None
         self._last_rx_message: Optional[float] = None
         self._counters = {"dm_in": 0, "channel_in": 0, "sent": 0, "send_errors": 0,
@@ -377,7 +379,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         s = self.settings
         if not s.host:
-            self._set_fatal_error("config_missing", "MESHCORE_HOST is not set", retryable=False)
+            self._fail("config_missing", "MESHCORE_HOST is not set", retryable=False)
             return False
         self._closing = self._failed = False
         if not self._acquire_lock():
@@ -405,12 +407,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 await client.close()
             self._client = self._remote = None
             self._release_lock()
-            self._set_fatal_error("connect_failed", f"Cannot reach MeshCore node {s.host}:{s.port}: {exc}",
-                                  retryable=True)
+            self._fail("connect_failed", f"Cannot reach MeshCore node {s.host}:{s.port}: {describe_error(exc)}",
+                       retryable=True)
             return False
 
         registry.register(self, self._home_key)
         self._connected_at = time.time()
+        self._last_error = None
         self._sync_wakeup = asyncio.Event()
         self._sync_wakeup.set()  # drain anything queued while we were away
         self._mark_connected()
@@ -463,8 +466,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return True
         if not acquired:
             owner = (existing or {}).get("profile") or (existing or {}).get("pid") or "another profile"
-            self._set_fatal_error("meshcore_lock", f"MeshCore node {identity} is already in use by {owner}",
-                                  retryable=True)
+            self._fail("meshcore_lock", f"MeshCore node {identity} is already in use by {owner}", retryable=True)
             return False
         self._lock_identity = identity
         return True
@@ -482,8 +484,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
             return
         self._failed = True
         logger.warning("MeshCore: link to %s:%s lost: %s", self.settings.host, self.settings.port, reason)
-        self._set_fatal_error("connection_lost", f"MeshCore link lost: {reason}", retryable=True)
+        self._fail("connection_lost", f"MeshCore link lost: {reason}", retryable=True)
         await self._notify_fatal_error()
+
+    def _fail(self, code: str, message: str, *, retryable: bool) -> None:
+        """Record why we are not connected, for the gateway and for the dashboard."""
+        self._last_error = {"code": code, "message": message, "at": time.time()}
+        self._set_fatal_error(code, message, retryable=retryable)
+        with contextlib.suppress(Exception):
+            self._write_state()
 
     async def _on_closed(self, error: Optional[BaseException]) -> None:
         await self._connection_lost(str(error) if error else "connection closed")
@@ -1162,6 +1171,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             "version": VERSION,
             "connected": self._client is not None and self._client.connected,
             "host": s.host, "port": s.port,
+            "last_error": self._last_error,
             "connected_at": self._connected_at,
             "last_message_at": self._last_rx_message,
             "node": {
@@ -1202,6 +1212,23 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     def _write_state(self) -> None:
         state.write_state(self.snapshot(), self._home)
+
+
+def describe_error(exc: BaseException) -> str:
+    """Turn a connect exception into something a person can act on."""
+    if isinstance(exc, p.MeshCoreTimeout):
+        return ("the connection opened but the node never answered. Usually something else is connected to "
+                "it (the MeshCore app over WiFi, or an old gateway process): the firmware serves one client "
+                "at a time. Otherwise the port isn't a MeshCore companion")
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in str(exc).lower():
+        return "timed out connecting. Check the IP address and port, and that the node is on the network"
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection refused. The node is reachable but nothing is listening on that port"
+    if isinstance(exc, socket.gaierror):
+        return f"unknown host ({exc})"
+    if isinstance(exc, OSError) and exc.errno in (101, 113, 65, 51):
+        return f"no route to the node ({exc.strerror})"
+    return str(exc) or type(exc).__name__
 
 
 def plan_channel(index: Any, name: str, key_hex: str, max_channels: int) -> Dict[str, Any]:
