@@ -626,14 +626,26 @@ class MeshCoreClient:
                     return frame
                 logger.debug("MeshCore: ignoring unexpected reply 0x%02x to 0x%02x", frame.code, payload[0])
 
+    async def _abandon_acquire(self, acquire: "asyncio.Future") -> None:
+        acquire.cancel()
+        await asyncio.wait({acquire})
+        if not acquire.cancelled():  # it won the race: give the lock back
+            self._lock.release()
+
     @contextlib.asynccontextmanager
     async def _locked(self, deadline: float):
         """Hold the request lock; time spent queueing counts against the caller's timeout."""
         remaining = deadline - asyncio.get_running_loop().time()
+        # Not asyncio.wait_for: on Python 3.11 a timeout racing the acquire can leak the lock.
+        acquire = asyncio.ensure_future(self._lock.acquire())
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=max(remaining, 0.001))
-        except asyncio.TimeoutError:
-            raise MeshCoreTimeout("node busy: request queue did not clear in time") from None
+            done, _ = await asyncio.wait({acquire}, timeout=max(remaining, 0.001))
+        except BaseException:
+            await self._abandon_acquire(acquire)
+            raise
+        if not done:
+            await self._abandon_acquire(acquire)
+            raise MeshCoreTimeout("node busy: request queue did not clear in time")
         try:
             yield
         finally:

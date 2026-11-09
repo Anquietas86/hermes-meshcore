@@ -428,13 +428,16 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._closing = True
         current = asyncio.current_task()
         tasks, self._tasks = self._tasks, []
-        for task in tasks:
-            if task is not current:
-                task.cancel()
-        for task in tasks:
-            if task is not current:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+        pending = [t for t in tasks if t is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            _, stuck = await asyncio.wait(pending, timeout=5)
+            if stuck:  # never hang the gateway's reconnect on a task that ignores cancellation
+                logger.warning("MeshCore: %d background task(s) did not stop: %s", len(stuck),
+                               [t.get_name() for t in stuck])
+                for task in stuck:
+                    task.cancel()
         client, self._client, self._remote = self._client, None, None
         if client is not None:
             with contextlib.suppress(Exception):
@@ -571,8 +574,13 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     async def _sync_loop(self) -> None:
         while True:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._sync_wakeup.wait(), timeout=SAFETY_SYNC_INTERVAL)
+            # Not asyncio.wait_for: on Python 3.11 it can swallow a cancellation that races with
+            # the event firing, leaving this loop running after disconnect().
+            waiter = asyncio.ensure_future(self._sync_wakeup.wait())
+            try:
+                await asyncio.wait({waiter}, timeout=SAFETY_SYNC_INTERVAL)
+            finally:
+                waiter.cancel()
             self._sync_wakeup.clear()
             await self._drain_messages()
             if self._contacts_dirty:
