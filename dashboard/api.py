@@ -100,6 +100,7 @@ CONFIG_FIELDS: Dict[str, tuple] = {
     "require_mention": ("MESHCORE_REQUIRE_MENTION", re.compile(r"^(?:true|(?:\d{1,3})(?:,\d{1,3})*)$")),
     "enable_dms": ("MESHCORE_ENABLE_DMS", _BOOL),
     "allow_all_users": ("MESHCORE_ALLOW_ALL_USERS", _BOOL),
+    "public_toolsets": ("MESHCORE_PUBLIC_TOOLSETS", re.compile(r"^[a-z0-9_-]{1,40}(?:,[a-z0-9_-]{1,40})*$")),
 }
 
 

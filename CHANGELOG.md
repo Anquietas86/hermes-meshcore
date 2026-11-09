@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.3
+
+### Changed
+
+- Strangers get help with general information again. 2.0.0's prompt was so
+  strict that the model deflected ordinary questions. It now tells the
+  model to help anyone with weather, the mesh, propagation, news and general
+  knowledge, and to keep only two things off limits: the operator's
+  personal information, and changing anything on the operator's behalf.
+- Public senders get the `web` toolset (read-only search and extract) as
+  well as `meshcore` by default.
+- Admin channels get everything: the prompt no longer tells the model to
+  keep memory and the user profile from their members. It still doesn't
+  assume the sender is the operator, since channel names are unverified.
+
+### Added
+
+- "Tools for everyone else" (`MESHCORE_PUBLIC_TOOLSETS`) on the dashboard.
+
 ## 2.0.2
 
 ### Fixed
