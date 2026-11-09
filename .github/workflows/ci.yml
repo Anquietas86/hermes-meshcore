@@ -7,6 +7,27 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dashboard test dependencies
+        run: python3 -m pip install --disable-pip-version-check fastapi httpx
+      - name: Unit and fake-node tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Compile sources
+        run: python3 -m compileall -q .
+      - name: Check whitespace and tracked bytecode
+        run: |
+          git diff --check HEAD^ HEAD 2>/dev/null || git diff --check
+          test -z "$(git ls-files '*.pyc' '*__pycache__*')"
+
+  hermes-smoke:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,24 +39,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install test runtime dependencies
-        run: python3 -m pip install --disable-pip-version-check pyyaml fastapi httpx
-      - name: Run focused security tests
-        working-directory: meshcore-platform
+      - name: Install Hermes
+        run: python3 -m pip install --disable-pip-version-check -e ./hermes-agent
+      - name: Smoke test against real Hermes
         env:
           HERMES_SOURCE_ROOT: ${{ github.workspace }}/hermes-agent
-          HERMES_PYTHON: python3
-          HERMES_PROFILE_DIR: ${{ runner.temp }}/hermes-profile
-        run: |
-          mkdir -p "$HERMES_PROFILE_DIR"
-          ./run_tests.sh
-      - name: Compile Python sources
-        working-directory: meshcore-platform
-        env:
-          PYTHONPATH: ${{ github.workspace }}/meshcore-platform:${{ github.workspace }}/hermes-agent
-        run: python3 -m compileall -q .
-      - name: Check whitespace and tracked bytecode
-        working-directory: meshcore-platform
-        run: |
-          git diff --check
-          test -z "$(git ls-files '*.pyc' '*__pycache__*')"
+        run: python3 meshcore-platform/tests/smoke_hermes.py

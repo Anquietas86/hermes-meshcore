@@ -1,55 +1,24 @@
 # MeshCore plugin installed
 
-MeshCore includes a Hermes dashboard tab at `/meshcore`.
+1. Point it at your node and pick who may talk to it, in `~/.hermes/.env`:
 
-## Required manual dashboard trust step
+   ```bash
+   MESHCORE_HOST=192.168.1.50
+   MESHCORE_ALLOWED_USERS=<your pubkey, or its first 12+ hex chars>
+   MESHCORE_ADMIN_NODES=<your pubkey>
+   ```
 
-Current Hermes versions block Python backend APIs from user-installed dashboard
-plugins by default. This is a security boundary: importing a plugin's
-`dashboard/api.py` executes Python code inside the dashboard process.
+2. Enable the plugin. This also mounts the dashboard tab's backend:
 
-MeshCore's dashboard needs that backend API, so explicitly trust it:
+   ```bash
+   hermes plugins enable meshcore-platform
+   ```
 
-```bash
-python3 - <<'PY'
-from pathlib import Path
-import yaml
-p = Path.home() / '.hermes' / 'config.yaml'
-cfg = yaml.safe_load(p.read_text()) or {}
-dashboard = cfg.setdefault('dashboard', {})
-trusted = dashboard.get('trusted_plugin_apis')
-if trusted is None:
-    trusted = []
-elif isinstance(trusted, str):
-    trusted = [x for x in trusted.replace(',', ' ').split() if x]
-elif not isinstance(trusted, list):
-    trusted = []
-if 'meshcore-platform' not in trusted:
-    trusted.append('meshcore-platform')
-dashboard['trusted_plugin_apis'] = trusted
-p.write_text(yaml.safe_dump(cfg, sort_keys=False))
-print('dashboard.trusted_plugin_apis =', trusted)
-PY
-```
+3. Restart the gateway and dashboard:
 
-Then restart the dashboard:
+   ```bash
+   hermes gateway restart
+   ```
 
-```bash
-systemctl --user restart hermes-dashboard.service
-```
-
-Verify:
-
-```bash
-curl -s http://127.0.0.1:9119/api/dashboard/plugins \
-  | jq '.[] | select(.name=="meshcore-platform") | {name, source, has_api}'
-```
-
-Expected:
-
-```json
-{"name":"meshcore-platform","source":"user","has_api":true}
-```
-
-If `has_api` is `false`, the dashboard tab will show 404 errors for
-`/api/plugins/meshcore-platform/status`.
+The **MeshCore** tab appears in the dashboard. If it shows "No such API
+endpoint", the plugin is not in `plugins.enabled` for that profile.

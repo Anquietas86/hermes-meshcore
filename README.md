@@ -1,206 +1,163 @@
-# Hermes MeshCore Platform Adapter
+# Hermes MeshCore Platform
 
 Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to a
-[MeshCore](https://meshcore.net/) companion radio node via TCP, enabling
-LoRa mesh communication as a native messaging platform.
+[MeshCore](https://meshcore.net/) companion radio over TCP, so the agent can
+chat on a LoRa mesh: in channels, and in direct messages.
 
-Uses the **raw binary protocol** directly — zero external dependencies, Python
-standard library only.
+It speaks the companion binary protocol directly. No dependencies beyond the
+Python standard library.
 
-## Features
+## What it does
 
-- **Channel monitoring** — respond in mesh channels with @mention detection
-- **Direct messages** — private conversations with fire-and-forget delivery
-- **Node-ID authorization** — admin nodes get full access, public users are restricted
-- **Message splitting** — auto-splits long responses at word boundaries with (N/M) markers
-- **Security-aware** — warns the model not to leak credentials in public broadcasts
-- **Admin channels** — mark trusted channels for sensitive replies
-- **Radio metadata** — RSSI, SNR, hops, and path info injected into channel context
-- **Self-healing** — silence watchdog with automatic reconnect, stale frame drain
-- **Remote repeater admin** — query remote repeaters via binary protocol commands over the mesh (`meshcore_admin_query` tool)
-- **Binary protocol** — uses `CMD_BINARY_REQ` (0x32) and `CMD_SEND_ANON_REQ` (0x33) with dedicated sub-opcodes for status, telemetry, neighbours, ACL, owner info, and more
-- **Neighbours parsing** — decoded neighbour lists with SNR and last-seen times
-- **Status parsing** — uptime, battery voltage, noise floor, RSSI, SNR, packet counts, errors, airtime
-- **Proper login** — `CMD_SEND_LOGIN` (0x1a) with full 32-byte public key + password; always attempts login even with guest/empty password
-- **90s poll timeout** — matches app behaviour for slow repeaters
-- **Contact lookup** — instant node details from the contact cache (`meshcore_contact` tool)
-- **Live dashboard** — real-time node telemetry, contacts, channels, configuration management, and remote repeater admin via the Hermes web dashboard
+- **Channels and DMs.** It answers in the channels you choose, with optional
+  @mention gating per channel. It answers DMs too, and the sender's name
+  comes from your contact list.
+- **Radio-sized replies.** Replies are plain text, split by bytes (not
+  characters) with `(1/3)` markers. A per-reply packet cap keeps a chatty
+  model from hogging airtime.
+- **Two trust levels.** Admin nodes and admin channels keep the profile's
+  full toolsets. Everyone else gets only the `meshcore` toolset and a
+  "this is a stranger on an open radio network" prompt. Only admins can run
+  gateway slash commands from the mesh.
+- **Remote repeater queries** (`meshcore_admin` tool, admins only). These are
+  read-only queries to repeaters and room servers:
 
-## Dashboard
+  | Command | Kind | What it returns |
+  |---|---|---|
+  | `status` | login | battery, uptime, queue, noise floor, RSSI/SNR, packet and airtime counters |
+  | `telemetry` | login | sensor readings (Cayenne LPP) |
+  | `neighbours` | login | repeaters heard directly, with SNR |
+  | `acl` | login | access list (usually needs an admin password) |
+  | `owner` | anonymous | node name and owner info |
+  | `clock` | anonymous | remote clock |
+  | `regions` | anonymous | allowed regions |
+  | `all` | both | status, neighbours, owner and clock, with a single login |
 
-The plugin includes a live dashboard tab at `/meshcore` showing:
+  "Login" queries log in first; a guest login with an empty password works
+  on most repeaters. Anonymous queries need a direct route to the repeater.
+  Text CLI commands (`ver`, `set …`) only work on a repeater's serial
+  console, so they are not offered.
+- **Contact lookup** (`meshcore_contact` tool). It looks up a node's pubkey,
+  type, hops and location from the local contact cache, with no radio
+  traffic.
+- **Cron and `hermes send` delivery** to `MESHCORE_HOME_CHANNEL`, through the
+  running gateway's connection.
+- **Dashboard tab.** It shows node status and stats, a searchable contact
+  list, a remote repeater query form, and settings with a restart button.
 
-- **📡 Connection & Contacts** — gateway status, host, last message, DMs, contact counts (repeaters/clients/rooms), channel list with names
-- **🖥️ Node & Telemetry** — node name, pubkey, location, radio params (frequency/bandwidth/SF/CR), battery voltage, uptime, TX/RX packets, signal (noise/RSSI/SNR)
-- **🔧 Remote Repeater Admin** — query any repeater on the mesh:
-  - **Node dropdown** — populated from live known nodes (repeaters only)
-  - **Command dropdown** — 17 read-only binary queries: `stats-core`, `stats-radio`, `stats-packets`, `ver`, `board`, `clock`, `neighbors`, `advert`, `get name`, `get radio`, `get tx`, `get repeat`, `get public.key`, `get advert.interval`, `get owner.info`, `get bridge.type`, `req_acl`, `region list allowed`, `region list denied`, `gps`
-  - **Password field** — for repeaters requiring authentication (guest/empty works for read-only)
-  - **Parsed response** — human-readable output (neighbour lists with SNR, status with uptime/battery/radio stats)
-- **⚙️ Configuration** — edit all gateway settings inline:
-  - **Channel checkbox matrix** — toggle Monitor/Admin/Mention per channel
-  - **Access toggles** — Allow All Users, Enable DMs (checkboxes)
-  - **Text fields** — Admin Nodes, Allowed Users (pubkey prefixes)
-  - **📋 Load Current** — revert unsaved changes
-  - **💾 Save Config** — writes to `.env` and `config.yaml`
-  - **🔄 Restart Gateway** — applies changes immediately
-
-Data refreshes every 5 seconds from a shared state file written by the gateway adapter — no second TCP connection to the node required.
-
-### Dashboard backend trust required on current Hermes
-
-Recent Hermes dashboard security hardening blocks Python backend APIs from
-non-bundled dashboard plugins by default. This is intentional: importing a
-user/project plugin's `dashboard/api.py` is arbitrary Python code execution.
-
-MeshCore's dashboard needs its backend API (`dashboard/api.py`) for status,
-configuration, contacts, nodes, health, and remote repeater admin. Therefore the
-operator must explicitly trust this plugin's dashboard API.
-
-Add `meshcore-platform` to `dashboard.trusted_plugin_apis` in `~/.hermes/config.yaml`:
-
-```yaml
-dashboard:
-  trusted_plugin_apis:
-    - meshcore-platform
-```
-
-If you already have trusted dashboard plugins, append `meshcore-platform` rather
-than replacing the list.
-
-Safe append command:
-
-```bash
-python3 - <<'PY'
-from pathlib import Path
-import yaml
-p = Path.home() / '.hermes' / 'config.yaml'
-cfg = yaml.safe_load(p.read_text()) or {}
-dashboard = cfg.setdefault('dashboard', {})
-trusted = dashboard.get('trusted_plugin_apis')
-if trusted is None:
-    trusted = []
-elif isinstance(trusted, str):
-    trusted = [x for x in trusted.replace(',', ' ').split() if x]
-elif not isinstance(trusted, list):
-    trusted = []
-if 'meshcore-platform' not in trusted:
-    trusted.append('meshcore-platform')
-dashboard['trusted_plugin_apis'] = trusted
-p.write_text(yaml.safe_dump(cfg, sort_keys=False))
-print('dashboard.trusted_plugin_apis =', trusted)
-PY
-```
-
-Then restart the dashboard:
-
-```bash
-systemctl --user restart hermes-dashboard.service
-# or, if running manually:
-hermes dashboard --stop
-hermes dashboard --host 0.0.0.0 --port 9119 --insecure --no-open
-```
-
-Expected verification:
-
-```bash
-curl -s http://127.0.0.1:9119/api/dashboard/plugins \
-  | jq '.[] | select(.name=="meshcore-platform") | {name, source, has_api}'
-```
-
-Expected result:
-
-```json
-{"name":"meshcore-platform","source":"user","has_api":true}
-```
-
-If `has_api` is `false`, the dashboard tab will show errors such as:
-
-```text
-404: {"detail":"No such API endpoint: /api/plugins/meshcore-platform/status"}
-```
-
-## Quick Install
+## Install
 
 ```bash
 hermes plugins install Anquietas86/hermes-meshcore
+hermes plugins enable meshcore-platform
 ```
 
-Or from the dashboard: Plugins → Install → enter `Anquietas86/hermes-meshcore`.
+Enabling the plugin is also what mounts the dashboard tab's backend. Hermes
+only imports a user plugin's `dashboard/api.py` when the plugin is listed in
+`plugins.enabled`.
 
-> **Note:** The plugin installer can display post-install instructions, but it
-> does not silently grant dashboard backend API trust. The manual trust step
-> above is required because it changes the dashboard Python-import security
-> boundary.
+## Configure
 
-## Configuration
-
-Add to `~/.hermes/.env`:
+Put these in `~/.hermes/.env` (or the profile's `.env`):
 
 ```bash
 # Required
-MESHCORE_HOST=192.168.0.141
+MESHCORE_HOST=192.168.1.50
 MESHCORE_PORT=5000
 
-# Recommended
-MESHCORE_ADMIN_NODES=your-pubkey-prefix     # Your node's pubkey prefix
-MESHCORE_HOME_CHANNEL=dm:your-pubkey-prefix # Where cron/notifications go
-MESHCORE_MONITOR_CHANNELS=1           # Channels to respond in (empty = discover only)
-MESHCORE_ENABLE_DMS=true
-MESHCORE_ALLOWED_USERS=your-pubkey-prefix,channel:1  # Who can talk (DMs by pubkey, channels by index)
+# Who may talk to the bot. Set this: with no allowlist Hermes denies
+# everyone and answers unknown DMs with a pairing code, over the air.
+MESHCORE_ALLOWED_USERS=a1b2c3d4e5f6            # pubkeys or 12+ hex-char prefixes
+MESHCORE_GROUP_ALLOWED_CHATS=channel:1         # channels where anyone may talk
 
-# Optional
-MESHCORE_ADMIN_CHANNELS=1             # Channels trusted for sensitive replies
-MESHCORE_REQUIRE_MENTION=0,2,3        # Channels requiring @mention (empty = none, "true" = all)
-MESHCORE_DEBUG=false                  # Enable packet-level debug logging (default: false)
+# Your own node(s): full toolsets, remote repeater queries, slash commands
+MESHCORE_ADMIN_NODES=a1b2c3d4e5f6...
+
+# Channels the bot answers in, and which of them need an @mention
+MESHCORE_MONITOR_CHANNELS=1
+MESHCORE_REQUIRE_MENTION=true                  # true = all, "0,2" = those, empty = none
+
+# Where cron jobs and notifications go
+MESHCORE_HOME_CHANNEL=dm:a1b2c3d4e5f6          # or channel:1
 ```
 
-### Per-channel @mention gating
+Then restart: `hermes gateway restart`.
 
-`MESHCORE_REQUIRE_MENTION` accepts three formats:
+### All settings
 
-| Value | Behavior |
-|-------|----------|
-| `true` / `1` / `yes` | All monitored channels require @mention |
-| `0,2,3` | Only channels 0, 2, 3 require @mention (channel 1 is free-for-all) |
-| *(empty)* | No channels require @mention — respond to everything |
+| Variable | Default | Meaning |
+|---|---|---|
+| `MESHCORE_HOST` | (required) | Companion node hostname or IP |
+| `MESHCORE_PORT` | `5000` | TCP port |
+| `MESHCORE_ALLOWED_USERS` | | Pubkeys or prefixes allowed to DM. Prefixes of 8–11 chars are matched against known contacts |
+| `MESHCORE_GROUP_ALLOWED_CHATS` | | `channel:N` list whose members may all talk to the bot |
+| `MESHCORE_ALLOW_ALL_USERS` | `false` | Anyone on the mesh may talk to the bot |
+| `MESHCORE_MONITOR_CHANNELS` | | Channel indexes to answer in. Empty means DMs only |
+| `MESHCORE_REQUIRE_MENTION` | | `true` = every monitored channel, `0,2` = only those, empty = none |
+| `MESHCORE_ENABLE_DMS` | `true` | Answer direct messages |
+| `MESHCORE_ADMIN_NODES` | | Operator pubkeys (8+ hex chars) |
+| `MESHCORE_ADMIN_CHANNELS` | | Channels treated as trusted. Anyone with the channel key can post there |
+| `MESHCORE_PUBLIC_TOOLSETS` | `meshcore` | Toolsets for non-admin senders (`meshcore_admin` is always removed) |
+| `MESHCORE_ADMIN_TOOLSETS` | | Pin admin toolsets. Default: the profile's own `platform_toolsets` |
+| `MESHCORE_HOME_CHANNEL` | | `channel:N` or `dm:<prefix>` for cron delivery |
+| `MESHCORE_BOT_NAME` | node name | Name matched for @mentions |
+| `MESHCORE_MAX_MESSAGE_BYTES` | `130` | Bytes per packet (40–200) |
+| `MESHCORE_MAX_CHUNKS` | `6` | Packets per reply before truncating |
+| `MESHCORE_ADVERT_ON_START` | `true` | Flood advert when the gateway starts |
+| `MESHCORE_DEBUG` | `false` | Log every frame |
 
-The bot name for @mention detection is auto-derived from your node's advert
-name. `MESHCORE_BOT_NAME` is available as an override if needed.
+Mentions can be `@Bot hi`, `Bot: hi`, or the MeshCore app's `@[Bot] hi`
+anywhere in the message.
 
-Then enable in `~/.hermes/config.yaml`:
-
-```yaml
-plugins:
-  enabled:
-    - meshcore-platform
-```
-
-Restart the gateway:
-
-```bash
-hermes gateway restart
-```
-
-## Authorization Model
-
-DMs and channels use different identity models:
+### Identity and trust
 
 | | DM | Channel |
 |---|---|---|
-| **Identity** | `pubkey_prefix` (cryptographic) | `channel:<idx>` (stable synthetic) |
-| **Admin check** | `MESHCORE_ADMIN_NODES` | `MESHCORE_ADMIN_CHANNELS` |
-| **Allowlist** | `MESHCORE_ALLOWED_USERS=your-pubkey-prefix` | `MESHCORE_ALLOWED_USERS=channel:3` |
+| Chat id | `dm:<12-hex prefix>` | `channel:<idx>` |
+| Sender id | pubkey prefix (cryptographic) | `channel:<idx>:<display name>` (claimed, not verified) |
+| Allowlist | `MESHCORE_ALLOWED_USERS` | `MESHCORE_GROUP_ALLOWED_CHATS` |
+| Admin | `MESHCORE_ADMIN_NODES` | `MESHCORE_ADMIN_CHANNELS` |
 
-Display names are not used for auth — they're mutable and ambiguous.
-Use `channel:<idx>` in `MESHCORE_ALLOWED_USERS` to trust an entire channel.
+Display names on channels are just text in the packet, so they are never used
+for authorization.
+
+## How it behaves on a flaky link
+
+- One TCP connection per node. A node in use by another profile is refused
+  with a clear error, because the companion firmware only serves one client.
+- If the link drops, or the node misses two keepalives, the adapter reports a
+  retryable error. Hermes's reconnect watcher then rebuilds it with backoff.
+  The adapter never fights the gateway by reconnecting on its own.
+- A reply packet that times out is not resent. It may already be on air,
+  and duplicates garble reception for everyone.
+- Messages that arrive while a repeater query is running are still delivered.
+  Every frame goes through one reader.
+
+## Multi-profile installs
+
+All state is keyed by the active profile's Hermes home. That includes the
+dashboard snapshot, the IPC queue for CLI tools and cron, and the live
+adapter lookup. Two profiles can therefore run different nodes side by side,
+and one profile never answers with another's radio.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The tests use small stand-ins for the Hermes gateway API (`tests/stubs`) and
+a fake companion node that speaks the real frame protocol over TCP
+(`tests/fakenode.py`). CI also runs a smoke test against the real
+`hermes-agent` checkout.
 
 ## Requirements
 
-- Hermes Agent (latest)
-- MeshCore companion radio node accessible via TCP
-- Python 3.11+ (stdlib only — no external dependencies)
-- `git` for plugin installation
+- Hermes Agent with platform plugin support (`provides_tools` needs a recent
+  release)
+- A MeshCore companion radio reachable over TCP (WiFi companion firmware,
+  or a serial-to-TCP bridge)
+- Python 3.11+
 
 ## License
 

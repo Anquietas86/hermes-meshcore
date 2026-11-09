@@ -1,372 +1,253 @@
-"""MeshCore dashboard API — node status, contacts, stats, and configuration.
+"""MeshCore dashboard backend, mounted at ``/api/plugins/meshcore-platform/``.
 
-Routes are mounted at /api/plugins/meshcore-platform/ by the dashboard.
-Reads from the shared state file written by the gateway adapter's keepalive loop.
-Config reads/writes the meshcore profile's config.yaml.
+Hermes imports this file on its own (not as part of the plugin package), so
+the shared ``state`` helpers are loaded by file path. Every request resolves
+the profile through ``hermes_constants.get_hermes_home()``, which the
+dashboard scopes per request on a multi-profile install.
+
+Handlers never block the event loop: file I/O is tiny and the gateway restart
+runs as a detached subprocess.
 """
 
-import json
-import os
-import subprocess
-import time
-from pathlib import Path
+from __future__ import annotations
 
-import yaml
+import asyncio
+import importlib.util
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from meshcore_utils import get_profile_scoped_dir
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _load_state_module():
+    name = "hermes_meshcore_dashboard_state"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, _PLUGIN_ROOT / "state.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+state = _load_state_module()
 router = APIRouter()
 
-# Use profile-scoped state file
-PROFILE_STATE_FILE = None  # Will be set dynamically
-MAX_STALE_SECONDS = 60
+_HEX_LIST = re.compile(r"^(?:[0-9a-fA-F]{8,64})(?:,[0-9a-fA-F]{8,64})*$")
+_INT_LIST = re.compile(r"^(?:\d{1,3})(?:,\d{1,3})*$")
+_CHAT_LIST = re.compile(r"^(?:channel:\d{1,3})(?:,channel:\d{1,3})*$")
+_BOOL = {"true", "false"}
 
-def _get_state_file():
-    """Get the profile-scoped state file path."""
-    global PROFILE_STATE_FILE
-    if PROFILE_STATE_FILE is None:
-        profile_dir = get_profile_scoped_dir()
-        PROFILE_STATE_FILE = str(profile_dir / "state.json")
-    return PROFILE_STATE_FILE
-
-# Auto-detect which profile runs MeshCore — check meshcore profile first, fall back to default
-def _detect_profile() -> str:
-    """Return the profile name that runs MeshCore (meshcore or default)."""
-    meshcore_cfg = os.path.expanduser("~/.hermes/profiles/meshcore/config.yaml")
-    if os.path.exists(meshcore_cfg):
-        return "meshcore"
-    return "default"
-
-def _config_path() -> str:
-    profile = _detect_profile()
-    if profile == "default":
-        return os.path.expanduser("~/.hermes/config.yaml")
-    return os.path.expanduser(f"~/.hermes/profiles/{profile}/config.yaml")
-
-def _env_path() -> str:
-    profile = _detect_profile()
-    if profile == "default":
-        return os.path.expanduser("~/.hermes/.env")
-    return os.path.expanduser(f"~/.hermes/profiles/{profile}/.env")
-
-# ── Config keys we expose for editing ──────────────────────────────────────
-CONFIG_KEYS = [
-    "admin_nodes",
-    "admin_channels",
-    "monitor_channels",
-    "require_mention",  # Changed to match the adapter's env var name
-    "allow_all_users",
-    "allowed_users",
-    "enable_dms",
-]
-
-def _get_admin_request_file():
-    """Get the profile-scoped admin request file path."""
-    profile_dir = get_profile_scoped_dir()
-    return str(profile_dir / "admin-request.json")
-
-def _get_admin_response_file():
-    """Get the profile-scoped admin response file path."""
-    profile_dir = get_profile_scoped_dir()
-    return str(profile_dir / "admin-response.json")
-
-def _get_advert_request_file():
-    """Get the profile-scoped advert request file path."""
-    profile_dir = get_profile_scoped_dir()
-    return str(profile_dir / "advert-request.json")
-
-
-def _read_state() -> dict:
-    """Read the shared state file written by the gateway adapter."""
-    try:
-        state_file = _get_state_file()
-        if not os.path.exists(state_file):
-            return {"connected": False, "error": "Gateway not running (no state file)"}
-        with open(state_file) as f:
-            state = json.load(f)
-        age = time.time() - state.get("updated_at", 0)
-        if age > MAX_STALE_SECONDS:
-            state["connected"] = False
-            state["stale"] = True
-            state["stale_seconds"] = round(age, 1)
-        return state
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
-
-
-def _read_config() -> dict:
-    """Read meshcore platform config — .env first (what gateway uses), then config.yaml extra."""
-    try:
-        # Read .env vars (what the gateway actually uses)
-        env_path = _env_path()
-        env_vars = {}
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        key, _, val = line.partition("=")
-                        env_vars[key.strip()] = val.strip().strip('"').strip("'")
-
-        # Read config.yaml extra (fallback)
-        with open(_config_path()) as f:
-            cfg = yaml.safe_load(f) or {}
-        extra = (
-            cfg.get("platforms", {})
-            .get("meshcore", {})
-            .get("extra", {})
-        )
-
-        # .env takes priority (matches gateway behaviour)
-        return {
-            "admin_nodes": env_vars.get("MESHCORE_ADMIN_NODES", extra.get("admin_nodes", "")),
-            "admin_channels": env_vars.get("MESHCORE_ADMIN_CHANNELS", extra.get("admin_channels", "")),
-            "monitor_channels": env_vars.get("MESHCORE_MONITOR_CHANNELS", extra.get("monitor_channels", "")),
-            "require_mention": env_vars.get("MESHCORE_REQUIRE_MENTION", extra.get("require_mention", "")),  # Updated key name
-            "allow_all_users": env_vars.get("MESHCORE_ALLOW_ALL_USERS", extra.get("allow_all_users", "false")),  # Changed default to match adapter
-            "allowed_users": env_vars.get("MESHCORE_ALLOWED_USERS", extra.get("allowed_users", "")),
-            "enable_dms": env_vars.get("MESHCORE_ENABLE_DMS", extra.get("enable_dms", "true")),
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# Map config keys to .env variable names
-CONFIG_TO_ENV = {
-    "admin_nodes": "MESHCORE_ADMIN_NODES",
-    "admin_channels": "MESHCORE_ADMIN_CHANNELS",
-    "monitor_channels": "MESHCORE_MONITOR_CHANNELS",
-    "require_mention": "MESHCORE_REQUIRE_MENTION",  # Updated key name
-    "allow_all_users": "MESHCORE_ALLOW_ALL_USERS",
-    "allowed_users": "MESHCORE_ALLOWED_USERS",
-    "enable_dms": "MESHCORE_ENABLE_DMS",
+# dashboard key -> (env var, validator, normaliser)
+CONFIG_FIELDS: Dict[str, tuple] = {
+    "admin_nodes": ("MESHCORE_ADMIN_NODES", _HEX_LIST),
+    "allowed_users": ("MESHCORE_ALLOWED_USERS", _HEX_LIST),
+    "admin_channels": ("MESHCORE_ADMIN_CHANNELS", _INT_LIST),
+    "monitor_channels": ("MESHCORE_MONITOR_CHANNELS", _INT_LIST),
+    "group_allowed_chats": ("MESHCORE_GROUP_ALLOWED_CHATS", _CHAT_LIST),
+    "require_mention": ("MESHCORE_REQUIRE_MENTION", re.compile(r"^(?:true|(?:\d{1,3})(?:,\d{1,3})*)$")),
+    "enable_dms": ("MESHCORE_ENABLE_DMS", _BOOL),
+    "allow_all_users": ("MESHCORE_ALLOW_ALL_USERS", _BOOL),
 }
 
 
-def _write_config(updates: dict) -> dict:
-    """Write meshcore platform config to both .env (what gateway reads) and config.yaml extra."""
+def _env_path() -> Path:
+    return state.hermes_home() / ".env"
+
+
+def _read_env() -> Dict[str, str]:
+    values: Dict[str, str] = {}
     try:
-        # Write to config.yaml extra
-        with open(_config_path()) as f:
-            cfg = yaml.safe_load(f) or {}
-        cfg.setdefault("platforms", {}).setdefault("meshcore", {}).setdefault("extra", {})
-        extra = cfg["platforms"]["meshcore"]["extra"]
-        for key in CONFIG_KEYS:
-            if key in updates:
-                extra[key] = str(updates[key])
-        with open(_config_path(), "w") as f:
-            yaml.safe_dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-        # Write to .env (what the gateway actually reads)
-        env_path = _env_path()
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                env_lines = f.readlines()
-            new_lines = []
-            updated_keys = set()
-            for line in env_lines:
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and "=" in stripped:
-                    key, _, _ = stripped.partition("=")
-                    key = key.strip()
-                    if key in CONFIG_TO_ENV.values():
-                        config_key = [k for k, v in CONFIG_TO_ENV.items() if v == key][0]
-                        if config_key in updates:
-                            new_lines.append(f"{key}={updates[config_key]}\n")
-                            updated_keys.add(key)
-                            continue
-                new_lines.append(line)
-            # Add any new keys not already in .env
-            for config_key, env_key in CONFIG_TO_ENV.items():
-                if config_key in updates and env_key not in updated_keys:
-                    new_lines.append(f"{env_key}={updates[config_key]}\n")
-            with open(env_path, "w") as f:
-                f.writelines(new_lines)
-
-        return _read_config()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+        lines = _env_path().read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, val = line.partition("=")
+            if key.startswith("export "):
+                key = key[7:]
+            values[key.strip()] = val.strip().strip('"').strip("'")
+    return values
 
 
-def _restart_gateway() -> dict:
-    """Trigger a gateway restart via hermes CLI."""
+def _validate(key: str, value: Any) -> str:
+    env, rule = CONFIG_FIELDS[key]
+    if isinstance(value, bool):
+        value = "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        value = ",".join(str(v) for v in value)
+    text = re.sub(r"\s+", "", str(value if value is not None else ""))
+    if text == "":
+        return ""
+    text = text.lower()
+    ok = text in rule if isinstance(rule, set) else bool(rule.match(text))
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Invalid value for {key}")
+    return text
+
+
+def _write_env(updates: Dict[str, str]) -> None:
+    path = _env_path()
     try:
-        result = subprocess.run(
-            ["hermes", "--profile", _detect_profile(), "gateway", "restart"],
-            capture_output=True, text=True, timeout=30,
-        )
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Restart timed out"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+    pending = dict(updates)
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.partition("=")[0].strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        if stripped and not stripped.startswith("#") and key in pending:
+            value = pending.pop(key)
+            if value:
+                out.append(f"{key}={value}\n")
+            continue
+        out.append(line if line.endswith("\n") else line + "\n")
+    out.extend(f"{key}={value}\n" for key, value in pending.items() if value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.writelines(out)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
-# ── Status routes ──────────────────────────────────────────────────────────
+def _current_config() -> Dict[str, str]:
+    env = _read_env()
+    return {key: env.get(var, "") for key, (var, _rule) in CONFIG_FIELDS.items()}
+
+
+# ── status ───────────────────────────────────────────────────────────────
+
+def _public_state() -> Dict[str, Any]:
+    snap = state.read_state()
+    snap.pop("contacts_list", None)
+    return snap
+
 
 @router.get("/status")
 async def get_status():
-    """Full node status — connection, radio, stats, contacts, admin."""
-    return JSONResponse(_read_state())
-
-
-@router.get("/contacts")
-async def get_contacts():
-    """List all known contacts with basic info."""
-    state = _read_state()
-    if not state.get("connected"):
-        return JSONResponse({"error": state.get("error", "Gateway not running")}, status_code=503)
-    contacts = state.get("contacts", {})
-    return JSONResponse({
-        "contacts": [],
-        "total": contacts.get("total", 0),
-        "repeaters": contacts.get("repeaters", 0),
-        "clients": contacts.get("clients", 0),
-        "rooms": contacts.get("rooms", 0),
-    })
-
-
-@router.get("/nodes")
-async def get_nodes():
-    """List known repeater nodes for the admin query dropdown."""
-    state = _read_state()
-    if not state.get("connected"):
-        return JSONResponse({"error": state.get("error", "Gateway not running")}, status_code=503)
-    return JSONResponse({"nodes": state.get("known_nodes", [])})
+    return JSONResponse(_public_state())
 
 
 @router.get("/health")
 async def get_health():
-    """Quick health check — connected, battery, last message."""
-    state = _read_state()
-    stats = state.get("stats", {})
+    snap = state.read_state()
+    stats = snap.get("stats") or {}
     return JSONResponse({
-        "connected": state.get("connected", False),
+        "connected": bool(snap.get("connected")),
+        "fresh": bool(snap.get("fresh")),
         "battery_mv": stats.get("battery_mv"),
-        "uptime_s": stats.get("uptime_s"),
-        "last_message_ago_s": state.get("last_message_ago_s"),
-        "contact_count": state.get("contacts", {}).get("total", 0),
+        "last_message_at": snap.get("last_message_at"),
+        "contact_count": (snap.get("contacts") or {}).get("total", 0),
     })
 
 
-# ── Config routes ──────────────────────────────────────────────────────────
+@router.get("/contacts")
+async def get_contacts():
+    snap = state.read_state()
+    if not snap.get("connected"):
+        return JSONResponse({"error": snap.get("error") or "Gateway not connected", "contacts": []}, status_code=503)
+    return JSONResponse({"contacts": state.list_contacts(snap), **(snap.get("contacts") or {})})
+
+
+@router.get("/nodes")
+async def get_nodes():
+    snap = state.read_state()
+    nodes = [c for c in state.list_contacts(snap) if c.get("type") in ("repeater", "room")]
+    return JSONResponse({"nodes": nodes, "commands": snap.get("commands") or {}})
+
+
+# ── config ───────────────────────────────────────────────────────────────
 
 @router.get("/config")
 async def get_config():
-    """Read current meshcore platform configuration."""
-    return JSONResponse(_read_config())
+    return JSONResponse(_current_config())
 
 
 @router.post("/config")
 async def update_config(request: Request):
-    """Update meshcore platform configuration. Accepts any subset of config keys."""
-    raw = await request.body()
     try:
-        body = json.loads(raw)
-    except json.JSONDecodeError:
+        body = await request.json()
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    updates = {k: v for k, v in body.items() if k in CONFIG_KEYS}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    unknown = sorted(set(body) - set(CONFIG_FIELDS))
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown config keys: {', '.join(unknown)}")
+    updates = {CONFIG_FIELDS[key][0]: _validate(key, value) for key, value in body.items()}
     if not updates:
-        raise HTTPException(status_code=400, detail="No valid config keys provided")
-    result = _write_config(updates)
-    return JSONResponse({"success": True, "config": result})
+        raise HTTPException(status_code=400, detail="No config keys provided")
+    await asyncio.to_thread(_write_env, updates)
+    return JSONResponse({"success": True, "config": _current_config(), "restart_required": True})
 
 
 @router.post("/restart")
 async def restart_gateway():
-    """Restart the meshcore gateway to apply config changes."""
-    result = _restart_gateway()
-    return JSONResponse(result)
+    """Ask Hermes to restart the gateway. Detached: the gateway may host this very dashboard."""
+    env = dict(os.environ, HERMES_HOME=str(state.hermes_home()))
+    try:
+        await asyncio.create_subprocess_exec(
+            "hermes", "gateway", "restart",
+            env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    except FileNotFoundError:
+        return JSONResponse({"success": False, "error": "hermes CLI not found on PATH"}, status_code=500)
+    return JSONResponse({"success": True, "message": "Gateway restart requested"})
 
 
-# ── Admin query routes ──────────────────────────────────────────────────────
+# ── remote admin ─────────────────────────────────────────────────────────
 
 @router.post("/admin/query")
 async def submit_admin_query(request: Request):
-    """Submit an admin query for a remote repeater. The gateway's keepalive
-    loop picks it up within 15s and writes the response file."""
-    raw = await request.body()
     try:
-        body = json.loads(raw)
-    except json.JSONDecodeError:
+        body = await request.json()
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    node = body.get("node", "").strip()
-    command = body.get("command", "").strip()
-    password = body.get("password", "")
-
+    node = str(body.get("node", "")).strip()
+    command = str(body.get("command", "")).strip()
     if not node or not command:
         raise HTTPException(status_code=400, detail="node and command are required")
-    if password:
-        raise HTTPException(
-            status_code=400,
-            detail="Password-bearing IPC requests are not supported",
-        )
-
-    # Check if a request is already pending
-    admin_request_file = _get_admin_request_file()
-    if os.path.exists(admin_request_file):
-        raise HTTPException(status_code=409, detail="An admin query is already in progress")
-
-    from meshcore_utils import generate_request_id
-    request_id = generate_request_id()
-    req_data = {
-        "request_id": request_id,
-        "node": node,
-        "command": command,
-        "submitted_at": time.time(),
-    }
-    from meshcore_utils import secure_write_json
-    secure_write_json(admin_request_file, req_data)
-
-    return JSONResponse({"success": True, "request_id": request_id, "message": "Query submitted — gateway will process within 15s"})
+    if body.get("password"):
+        raise HTTPException(status_code=400, detail=(
+            "Passwords are not accepted from the dashboard (they would have to be written to disk). "
+            "Use guest access, or ask the agent from an admin DM."))
+    snap = state.read_state()
+    if not snap.get("fresh"):
+        raise HTTPException(status_code=503, detail=snap.get("error") or "Gateway not running")
+    if not (snap.get("config") or {}).get("admin_enabled"):
+        raise HTTPException(status_code=403, detail="Remote admin is disabled (set MESHCORE_ADMIN_NODES)")
+    request_id = state.submit_request("admin_query", {"node": node, "command": command})
+    return JSONResponse({"success": True, "request_id": request_id})
 
 
 @router.get("/admin/result")
 async def get_admin_result(request_id: str = ""):
-    """Poll for the result of an admin query. Returns the response if complete,
-    or status=pending if still waiting."""
-    admin_request_file = _get_admin_request_file()
-    if os.path.exists(admin_request_file):
-        return JSONResponse({"status": "pending", "message": "Request not yet picked up by gateway"})
-
-    admin_response_file = _get_admin_response_file()
-    if not os.path.exists(admin_response_file):
-        return JSONResponse({"status": "pending", "message": "Waiting for response…"})
-
-    from meshcore_utils import secure_read_json
     try:
-        result = secure_read_json(admin_response_file, require_matching_request_id=request_id if request_id else None)
+        result = state.read_response(request_id)
     except ValueError:
-        # Request ID mismatch
-        return JSONResponse({"status": "pending", "message": "Different request in progress"})
+        raise HTTPException(status_code=400, detail="Invalid request id")
+    if result is not None:
+        return JSONResponse({"status": "complete", "result": result})
+    queued = state.request_pending(request_id)
+    return JSONResponse({"status": "pending", "queued": queued})
 
-    if result is None:
-        return JSONResponse({"status": "pending", "message": "Waiting for response…"})
-
-    # Clean up response file after reading
-    from meshcore_utils import secure_remove
-    secure_remove(admin_response_file)
-    return JSONResponse({"status": "complete", "result": result})
-
-
-# ── Advert trigger ──────────────────────────────────────────────────────────
 
 @router.post("/advert")
 async def trigger_advert():
-    """Trigger a flood advert on the local node. The gateway's keepalive
-    loop picks it up within 15s and sends the advert command."""
-    advert_request_file = _get_advert_request_file()
-    if os.path.exists(advert_request_file):
-        raise HTTPException(status_code=409, detail="An advert request is already pending")
-
-    req_data = {"action": "advert", "submitted_at": time.time()}
-    from meshcore_utils import secure_write_json
-    secure_write_json(advert_request_file, req_data)
-
-    return JSONResponse({"success": True, "message": "Advert request submitted — gateway will process within 15s"})
+    snap = state.read_state()
+    if not snap.get("fresh"):
+        raise HTTPException(status_code=503, detail=snap.get("error") or "Gateway not running")
+    request_id = state.submit_request("advert", {"flood": True})
+    return JSONResponse({"success": True, "request_id": request_id})
