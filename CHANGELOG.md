@@ -17,6 +17,9 @@
 - Node connection settings on the dashboard: host and port, plus a
   "Test connection" button. The test only runs while the gateway isn't
   connected, because the node serves one client at a time.
+- Home channel and repeater-watch alert target on the dashboard, with a
+  contact picker and a warning when the key isn't one of the node's
+  contacts.
 - When the gateway can't connect, the dashboard shows why: for example,
   refused, timed out, or connected but the node never answered (usually
   the MeshCore app or an old gateway process holding the link).

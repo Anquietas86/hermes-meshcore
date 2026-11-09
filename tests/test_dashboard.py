@@ -108,6 +108,15 @@ class DashboardTests(unittest.TestCase):
                      {"port": "50a"}, {"host": "serial:/etc/../x y"}):
             self.assertEqual(self.client.post(self.url("/config"), json=body).status_code, 400, body)
 
+    def test_notification_targets(self):
+        r = self.client.post(self.url("/config"), json={"home_channel": "dm:3D22D2F1B71E", "watch_notify": "channel:1"})
+        self.assertEqual(r.status_code, 200, r.text)
+        text = self.env_file.read_text()
+        self.assertIn("MESHCORE_HOME_CHANNEL=dm:3d22d2f1b71e\n", text)
+        self.assertIn("MESHCORE_WATCH_NOTIFY=channel:1\n", text)
+        for body in ({"home_channel": "dm:xyz"}, {"home_channel": "3d22d2f1b71e"}, {"watch_notify": "channel:a"}):
+            self.assertEqual(self.client.post(self.url("/config"), json=body).status_code, 400, body)
+
     def test_connection_test(self):
         import asyncio
         import threading

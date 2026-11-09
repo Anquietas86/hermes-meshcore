@@ -83,12 +83,15 @@ _BOOL = {"true", "false"}
 _HOST = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[?[0-9A-Fa-f:.]{2,45}\]?"
                    r"|serial:/dev/[A-Za-z0-9._/-]{1,100})$")
 _PORT = re.compile(r"^(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$")
+_TARGET = re.compile(r"^(?:channel:\d{1,3}|dm:[0-9a-f]{8,64})$")
 _KEEP_CASE = {"host"}  # serial device paths are case-sensitive
 
 # dashboard key -> (env var, validator, normaliser)
 CONFIG_FIELDS: Dict[str, tuple] = {
     "host": ("MESHCORE_HOST", _HOST),
     "port": ("MESHCORE_PORT", _PORT),
+    "home_channel": ("MESHCORE_HOME_CHANNEL", _TARGET),
+    "watch_notify": ("MESHCORE_WATCH_NOTIFY", _TARGET),
     "admin_nodes": ("MESHCORE_ADMIN_NODES", _HEX_LIST),
     "allowed_users": ("MESHCORE_ALLOWED_USERS", _HEX_LIST),
     "admin_channels": ("MESHCORE_ADMIN_CHANNELS", _INT_LIST),
