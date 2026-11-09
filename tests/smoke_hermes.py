@@ -61,7 +61,7 @@ async def main() -> None:
     plugin = load_plugin()
     ctx = Ctx()
     plugin.register(ctx)
-    assert [t[0] for t in ctx.tools] == ["meshcore_contact", "meshcore_admin"], ctx.tools
+    assert [t[0] for t in ctx.tools] == ["meshcore_contact", "meshcore_nearby", "meshcore_admin"], ctx.tools
 
     from gateway.config import Platform, PlatformConfig
     from gateway.platform_registry import platform_registry
