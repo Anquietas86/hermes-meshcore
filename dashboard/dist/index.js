@@ -81,7 +81,10 @@
     return h(Card, { title: "📡 Node" },
       h("span", { className: "mc-badge", style: { background: color + "22", color: color } }, label),
       d.error && h("div", { className: "mc-msg" }, d.error),
+      !ok && d.last_error && h("div", { className: "mc-msg", style: { color: "var(--color-destructive,#dc2626)" } },
+        "Last error (" + ago(d.last_error.at) + "): " + d.last_error.message),
       h(Row, { label: "Gateway", value: d.host ? d.host + ":" + d.port : null, mono: true }),
+      h(Row, { label: "Hermes profile", value: d.profile }),
       h(Row, { label: "Name", value: node.name }),
       h(Row, { label: "Pubkey", value: node.pubkey_prefix, mono: true }),
       h(Row, { label: "Firmware", value: [node.model, node.firmware].filter(Boolean).join(" ") }),
@@ -255,6 +258,14 @@
   }
 
   // ── Settings ──────────────────────────────────────────────────────────
+  var NODE_FIELDS = [
+    { key: "host", label: "Node IP or hostname", hint: "192.168.1.50 (or serial:/dev/ttyUSB0)" },
+    { key: "port", label: "TCP port", hint: "5000" }
+  ];
+  var TARGET_FIELDS = [
+    { key: "home_channel", label: "Home channel (startup notice, cron jobs)", hint: "dm:3d22d2f1b71e or channel:1" },
+    { key: "watch_notify", label: "Repeater watch alerts go to", hint: "empty = home channel" }
+  ];
   var FIELDS = [
     { key: "monitor_channels", label: "Channels to answer in (indexes)", hint: "1,2" },
     { key: "require_mention", label: "Channels that need an @mention", hint: "true = all, or 0,2" },
@@ -270,8 +281,14 @@
     var _b = useState({}), edits = _b[0], setEdits = _b[1];
     var _c = useState(null), msg = _c[0], setMsg = _c[1];
     var _d = useState(false), busy = _d[0], setBusy = _d[1];
+    var _e = useState([]), people = _e[0], setPeople = _e[1];
     function load() { api("/config").then(function (d) { setCfg(d); setEdits({}); }).catch(function (e) { setMsg(errText(e)); }); }
     useEffect(load, []);
+    useEffect(function () {
+      api("/contacts").then(function (d) {
+        setPeople((d.contacts || []).filter(function (c) { return c.type === "client"; }));
+      }).catch(function () {});
+    }, []);
     if (!cfg) return h(Card, { title: "⚙️ Settings" }, msg || "Loading…");
     function val(k) { return Object.prototype.hasOwnProperty.call(edits, k) ? edits[k] : (cfg[k] || ""); }
     function set(k, v) { var n = Object.assign({}, edits); n[k] = v; setEdits(n); }
@@ -280,16 +297,45 @@
       post("/config", edits).then(function (r) { setCfg(r.config); setEdits({}); setMsg("Saved. Restart the gateway to apply."); })
         .catch(function (e) { setMsg("Not saved: " + errText(e)); }).then(function () { setBusy(false); });
     }
+    function test() {
+      setBusy(true); setMsg("Testing connection…");
+      post("/test-connection", { host: val("host"), port: val("port") }).then(function (r) {
+        if (r.skipped) setMsg(r.message + ", so there's nothing to test (and a test would knock it off).");
+        else if (r.success) setMsg("✅ Reached " + (r.node_name || "the node") + " (" + r.pubkey_prefix + ") at " + r.host + ":" + r.port + " in " + r.ms + " ms.");
+        else setMsg("❌ " + r.host + ":" + r.port + ": " + r.error);
+      }).catch(function (e) { setMsg(errText(e)); }).then(function () { setBusy(false); });
+    }
+    function field(f) {
+      return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
+        h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }));
+    }
+    function targetField(f) {
+      var v = String(val(f.key) || "").trim().toLowerCase();
+      var unknown = v.indexOf("dm:") === 0 && people.length && !people.some(function (c) { return c.pubkey.indexOf(v.slice(3)) === 0; });
+      return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
+        h("div", { style: { display: "flex", gap: ".5rem" } },
+          h("input", { className: "mc-input", style: { flex: 1 }, value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }),
+          people.length > 0 && h("select", { className: "mc-input", style: { width: "11rem" }, value: "",
+            onChange: function (e) { if (e.target.value) set(f.key, e.target.value); } },
+            h("option", { value: "" }, "Pick a contact…"),
+            people.map(function (c) { return h("option", { key: c.pubkey, value: "dm:" + c.pubkey_prefix }, c.name + " (" + c.pubkey_prefix.slice(0, 6) + ")"); }))),
+        unknown && h("div", { className: "mc-msg", style: { color: "var(--color-destructive,#dc2626)" } },
+          "⚠️ That key isn't in the node's contacts, so messages to it go nowhere."));
+    }
     function restart() {
       setBusy(true);
       post("/restart").then(function () { setMsg("Restart requested."); })
         .catch(function (e) { setMsg(errText(e)); }).then(function () { setBusy(false); });
     }
     return h(Card, { title: "⚙️ Settings" },
-      FIELDS.map(function (f) {
-        return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
-          h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }));
-      }),
+      h("div", { style: { fontWeight: 600, fontSize: ".85rem", margin: ".25rem 0" } }, "Node connection"),
+      NODE_FIELDS.map(field),
+      h("div", { className: "mc-actions" },
+        h("button", { className: "mc-btn", onClick: test, disabled: busy || !val("host") }, "🔌 Test connection")),
+      h("div", { style: { fontWeight: 600, fontSize: ".85rem", margin: ".75rem 0 .25rem" } }, "Notifications"),
+      TARGET_FIELDS.map(targetField),
+      h("div", { style: { fontWeight: 600, fontSize: ".85rem", margin: ".75rem 0 .25rem" } }, "Behaviour"),
+      FIELDS.map(field),
       TOGGLES.map(function (t) {
         return h("label", { key: t.key, style: { display: "block", fontSize: ".85rem", margin: ".25rem 0" } },
           h("input", { type: "checkbox", checked: String(val(t.key)).toLowerCase() === "true" || (t.key === "enable_dms" && val(t.key) === ""),

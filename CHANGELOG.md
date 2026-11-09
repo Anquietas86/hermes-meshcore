@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.1
+
+### Fixed
+
+- The dashboard tab finds the profile that runs MeshCore. When the
+  dashboard's own profile has no MeshCore gateway (for example, the bot
+  runs under `hermes -p meshcore` and the dashboard on the default
+  profile), it uses the profile whose gateway reported most recently. 2.0.0
+  only looked at the dashboard's own profile, so it showed "Disconnected"
+  while the bot was running fine. Settings, channel changes and queries
+  follow the same profile. The status card shows which one it is.
+
+### Added
+
+- Node connection settings on the dashboard: host and port, plus a
+  "Test connection" button. The test only runs while the gateway isn't
+  connected, because the node serves one client at a time.
+- Home channel and repeater-watch alert target on the dashboard, with a
+  contact picker and a warning when the key isn't one of the node's
+  contacts.
+- When the gateway can't connect, the dashboard shows why: for example,
+  refused, timed out, or connected but the node never answered (usually
+  the MeshCore app or an old gateway process holding the link).
+
 ## 2.0.0
 
 A ground-up rebuild against the current Hermes platform plugin contract.
