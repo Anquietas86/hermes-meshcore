@@ -77,7 +77,7 @@ except TypeError:
     _EVENT_HAS_CONTEXT = False
 
 PLATFORM_NAME = "meshcore"
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 KEEPALIVE_INTERVAL = 30.0
 KEEPALIVE_TIMEOUT = 8.0

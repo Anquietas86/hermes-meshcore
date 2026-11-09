@@ -82,6 +82,19 @@ async def check_public_access(adapter, ctx, source) -> None:
     assert resolve_toolset(access.PUBLIC_TOOLSET) == ["web_search"], resolve_toolset(access.PUBLIC_TOOLSET)
     enabled = _get_platform_tools({"platform_toolsets": {"meshcore": names}}, "meshcore")
     assert access.PUBLIC_TOOLSET in enabled, enabled
+    # A picked MCP tool must bring its own server (and only that one) into the session.
+    from tools import mcp_tool as core
+    core._mcp_tool_server_names["mcp__homeassistant__ha_get_state"] = "homeassistant"
+    try:
+        adapter.settings.public_tools = ["mcp__homeassistant__ha_get_state"]
+        names = adapter.toolsets_for_source(source)
+        assert "no_mcp" not in names and "mcp-homeassistant" in names, names
+        config = {"mcp_servers": {"homeassistant": {"command": "true"}, "other": {"command": "true"}},
+                  "platform_toolsets": {"meshcore": names}}
+        enabled = _get_platform_tools(config, "meshcore")
+        assert "homeassistant" in enabled and "other" not in enabled, enabled
+    finally:
+        core._mcp_tool_server_names.pop("mcp__homeassistant__ha_get_state", None)
     adapter.settings.public_tools = []
     adapter._allowlist = None
 

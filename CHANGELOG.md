@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.1
+
+### Fixed
+
+- MCP tools picked on the Public access card now reach public senders.
+  2.1.0 put them in the public toolset but still sent Hermes `no_mcp`, so
+  their servers never loaded. The public list now names the servers behind
+  the picked tools, and the hook still blocks those servers' other tools.
+
 ## 2.1.0
 
 ### Security
