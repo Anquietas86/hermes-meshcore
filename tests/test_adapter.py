@@ -188,7 +188,7 @@ class InboundTests(AdapterTestBase):
         self.assertEqual([e.text for e in self.adapter.events], ["weather?"])
         ev = self.adapter.events[0]
         self.assertEqual((ev.source.chat_id, ev.source.chat_type, ev.source.user_name), ("channel:1", "group", "Alice"))
-        self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore"])
+        self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore", "web"])
         self.assertIn('from "Alice" in MeshCore channel Hermes', ev.channel_prompt)
         self.assertIn("several different people", ev.channel_prompt)
 

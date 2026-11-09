@@ -1,7 +1,7 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 2.0.2
+version: 2.0.3
 description: >
   MeshCore LoRa mesh platform for Hermes Agent. Talks to a MeshCore
   companion radio over TCP and relays channel messages and DMs to the
@@ -54,7 +54,7 @@ optional_env:
     prompt: "Admin channel indexes"
     password: false
   - name: MESHCORE_PUBLIC_TOOLSETS
-    description: "Toolsets for non-admin senders (default meshcore)"
+    description: "Toolsets for non-admin senders (default meshcore,web: read-only lookups)"
     prompt: "Public toolsets"
     password: false
   - name: MESHCORE_ADMIN_TOOLSETS

@@ -15,10 +15,12 @@ Python standard library.
 - **Radio-sized replies.** Replies are plain text, split by bytes (not
   characters) with `(1/3)` markers. A per-reply packet cap keeps a chatty
   model from hogging airtime.
-- **Two trust levels.** Admin nodes and admin channels keep the profile's
-  full toolsets. Everyone else gets only the `meshcore` toolset and a
-  "this is a stranger on an open radio network" prompt. Only admins can run
-  gateway slash commands from the mesh.
+- **Two trust levels.** Admin nodes and admin channels get everything: the
+  profile's full toolsets, memory and your profile. Everyone else can still
+  ask for general information (weather, the mesh, propagation, anything on
+  the web) through read-only tools, `meshcore` and `web` by default. They
+  can't see your personal information or change anything. Only admins can
+  run gateway slash commands from the mesh.
 - **Remote repeater queries** (`meshcore_admin` tool, admins only). These are
   read-only queries to repeaters and room servers:
 
@@ -127,7 +129,7 @@ Then restart: `hermes gateway restart`.
 | `MESHCORE_ENABLE_DMS` | `true` | Answer direct messages |
 | `MESHCORE_ADMIN_NODES` | | Operator pubkeys (8+ hex chars) |
 | `MESHCORE_ADMIN_CHANNELS` | | Channels treated as trusted. Anyone with the channel key can post there |
-| `MESHCORE_PUBLIC_TOOLSETS` | `meshcore` | Toolsets for non-admin senders (`meshcore_admin` is always removed) |
+| `MESHCORE_PUBLIC_TOOLSETS` | `meshcore,web` | Toolsets for non-admin senders. Keep them read-only (`meshcore_admin` is always removed) |
 | `MESHCORE_ADMIN_TOOLSETS` | | Pin admin toolsets. Default: the profile's own `platform_toolsets` |
 | `MESHCORE_HOME_CHANNEL` | | `channel:N` or `dm:<prefix>` for cron delivery |
 | `MESHCORE_BOT_NAME` | node name | Name matched for @mentions |
@@ -175,8 +177,16 @@ note says:
 - on channels, several different people are talking, and every reply is
   broadcast to everyone in radio range.
 
-Public senders also don't get the `memory` tool, unless you add it to
-`MESHCORE_PUBLIC_TOOLSETS`.
+The note also tells the model to help strangers with general information
+(weather, the mesh, propagation, news) and not to change anything on your
+behalf for them. Public senders get read-only tools only (`meshcore` and
+`web` by default), so no `memory`, files, terminal or cron. If your weather
+or propagation lookups come from your own toolset, add its name to
+`MESHCORE_PUBLIC_TOOLSETS`, as long as it only reads.
+
+Admin channels are treated as your people: the model may use memory and
+your profile there, but it doesn't assume the sender is you, because
+anyone with the channel key can post.
 
 Prompting lowers the risk, but it is not a hard guarantee. If the bot faces
 the public, the reliable fix is a separate Hermes profile for the mesh bot.
