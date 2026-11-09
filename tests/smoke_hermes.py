@@ -97,6 +97,17 @@ async def main() -> None:
         assert event.text == "hello: mesh", event.text
         assert event.source.chat_id == "dm:" + fn.FakeNode.BOB[:12]
         assert adapter.toolsets_for_source(event.source) == ["meshcore"]
+        # The gateway's admission check refuses events it can't persist ("Hermes refused this
+        # message (invalid_params)"). Run the same per-event checks it runs.
+        try:
+            from gateway import session_envelope as envelope
+        except ImportError:
+            envelope = None
+        if envelope is not None and hasattr(envelope, "_native_metadata"):
+            assert envelope._native_metadata(event) is not None, f"metadata refused: {event.metadata!r}"
+        for name in ("channel_prompt", "channel_context"):
+            value = getattr(event, name, None)
+            assert value is None or isinstance(value, str), name
         result = await adapter.send(event.source.chat_id, "hi back")
         assert result.success, result.error
         result = await adapter.query_remote("Hilltop RPT", "status")

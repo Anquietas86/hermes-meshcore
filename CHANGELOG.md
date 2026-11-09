@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+
+- Messages are no longer refused by Hermes with "Hermes refused this
+  message (invalid_params)". Current Hermes rejects inbound events that
+  carry platform metadata it doesn't know, and the adapter attached radio
+  details there. They were already in the per-message prompt, so the
+  metadata is gone.
+- The dashboard's contact list and contact picker reload when the gateway
+  reconnects, instead of staying on "Gateway not connected" after a
+  restart.
+- A stray "0" no longer appears under the home channel field.
+
+### Added
+
+- The admin node and allowed sender fields warn about keys that aren't in
+  the node's contacts.
+
 ## 2.0.1
 
 ### Fixed
