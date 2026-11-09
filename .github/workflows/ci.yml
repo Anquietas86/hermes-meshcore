@@ -36,13 +36,13 @@ jobs:
         with:
           repository: NousResearch/hermes-agent
           path: hermes-agent
-      - uses: actions/setup-python@v5
-        with:
-          # Hermes pins its runtime dependencies for Python 3.14+ only.
-          python-version: '3.14'
-      - name: Install Hermes
-        run: python3 -m pip install --disable-pip-version-check -e ./hermes-agent
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Hermes from its lockfile
+        # Hermes pins its runtime dependencies for Python 3.14+ and resolves
+        # them with uv (plain pip hits conflicts its lockfile overrides).
+        working-directory: hermes-agent
+        run: uv sync --frozen --python 3.14
       - name: Smoke test against real Hermes
         env:
           HERMES_SOURCE_ROOT: ${{ github.workspace }}/hermes-agent
-        run: python3 meshcore-platform/tests/smoke_hermes.py
+        run: hermes-agent/.venv/bin/python meshcore-platform/tests/smoke_hermes.py
