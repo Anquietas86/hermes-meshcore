@@ -49,6 +49,9 @@ A ground-up rebuild against the current Hermes platform plugin contract.
   - Replies are sent one at a time, never interleaved.
   - DM parts wait for the recipient's ACK and are retried once over a flood
     route if none arrives.
+- Only final answers go over the air. The platform declares Hermes's
+  "minimal" display tier, so there are no tool-progress, streaming, interim,
+  reasoning, long-running or busy-ack messages.
 - A per-sender rate limit (`MESHCORE_RATE_LIMIT`, default 6 per 10 minutes).
   Admins are exempt.
 - Recent channel messages go along with a mention as context

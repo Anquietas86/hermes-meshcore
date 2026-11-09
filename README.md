@@ -52,6 +52,11 @@ Python standard library.
   each part waits long enough for repeaters to finish relaying the one
   before it. DM parts wait for the recipient's ACK. Without one, the part is
   retried once over a flood route, the way the MeshCore app does it.
+- **Final answers only.** The platform registers as a "minimal" display
+  surface, so Hermes sends no tool-progress messages, streaming, "working on
+  it" updates, reasoning, long-running notices or busy acknowledgements over
+  the air. You can still opt into any of them per platform in
+  `display.platforms.meshcore`, if you really want to spend airtime on them.
 - **Rate limiting.** Each non-admin sender gets 6 messages per 10 minutes by
   default. DM senders get one short "too many messages" reply; on channels
   the bot just stays quiet.

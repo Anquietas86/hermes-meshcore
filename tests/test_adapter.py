@@ -371,7 +371,9 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(ctx.platform["name"], "meshcore")
         self.assertEqual(ctx.platform["max_message_length"], 0)
         self.assertIs(ctx.platform["standalone_sender_fn"], A._standalone_send)
-        self.assertNotIn("dashboard_description", ctx.platform)  # not a field in the stub registry
+        self.assertNotIn("dashboard_description", ctx.platform)
+        self.assertEqual(ctx.platform["display_tier"], "minimal")
+        self.assertFalse(ctx.platform["display_overrides"]["busy_steer_ack_enabled"])  # not a field in the stub registry
         self.assertEqual([t["name"] for t in ctx.tools], ["meshcore_contact", "meshcore_nearby", "meshcore_admin"])
 
     def test_env_enablement(self):

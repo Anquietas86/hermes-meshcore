@@ -1277,6 +1277,14 @@ def interactive_setup() -> None:
     print_success("MeshCore settings saved. Restart the gateway to apply them.")
 
 
+DISPLAY_OVERRIDES = {
+    "show_reasoning": False,
+    "thinking_progress": False,
+    "busy_steer_ack_enabled": False,
+    "suppress_warning_notifications": True,
+}
+
+
 def register_platform(ctx) -> None:
     kwargs: Dict[str, Any] = dict(
         name=PLATFORM_NAME,
@@ -1303,6 +1311,10 @@ def register_platform(ctx) -> None:
         "group_allowed_chats_env": "MESHCORE_GROUP_ALLOWED_CHATS",
         "allowlist_suppresses_pairing": True,  # never broadcast pairing codes over the air
         "dashboard_description": "Relay LoRa mesh channel messages and DMs between a MeshCore node and Hermes.",
+        # Every message costs airtime: only final answers go out. No tool progress, streaming,
+        # interim "working on it" messages, long-running notices or busy acknowledgements.
+        "display_tier": "minimal",
+        "display_overrides": dict(DISPLAY_OVERRIDES),
     }
     try:
         from gateway.platform_registry import PlatformEntry

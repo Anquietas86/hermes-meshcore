@@ -69,6 +69,11 @@ async def main() -> None:
     assert entry is not None and entry.standalone_sender_fn is not None
     assert entry.group_allowed_chats_env == "MESHCORE_GROUP_ALLOWED_CHATS"
     assert Platform("meshcore").value == "meshcore"
+    from gateway.display_config import resolve_display_setting
+    for key, expected in (("tool_progress", "off"), ("streaming", False), ("interim_assistant_messages", False),
+                          ("long_running_notifications", False), ("busy_steer_ack_enabled", False)):
+        value = resolve_display_setting({}, "meshcore", key)
+        assert value == expected, f"display {key}={value!r}, expected {expected!r}"
 
     node = await fn.FakeNode().start()
     os.environ.update(MESHCORE_HOST="127.0.0.1", MESHCORE_PORT=str(node.port), MESHCORE_MONITOR_CHANNELS="1",
