@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.2.0
+
+### Added
+
+- Monitored channels that do not require a mention now mark their inbound
+  messages `reply_expected=False`, and the per-turn prompt says a message that
+  is not addressed to the bot can be left unanswered with a `NO_REPLY` marker.
+  A chatty channel previously forced a reply to every message it carried
+  (silence is only honoured by the gateway when `reply_expected` is false), so
+  the bot would answer other people's conversations. Mention-gated channels and
+  admin channels still expect a reply, and DMs are unchanged. Passed through
+  when the running Hermes supports the `MessageEvent.reply_expected` field,
+  skipped otherwise.
+
 ## 2.1.2
 
 ### Fixed
