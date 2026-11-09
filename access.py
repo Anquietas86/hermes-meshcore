@@ -137,22 +137,26 @@ def names_mcp_server(toolsets: Iterable[str], servers: Optional[Set[str]] = None
     return any(t.startswith("mcp-") or t in servers for t in toolsets)
 
 
+def mcp_servers_for(tools: Iterable[str]) -> List[str]:
+    """The ``mcp-<server>`` toolsets behind the chosen MCP tools."""
+    try:
+        from tools import mcp_tool as core
+        owners = core._mcp_tool_server_names
+    except Exception:
+        return []
+    return list(dict.fromkeys(f"mcp-{owners[t]}" for t in tools if owners.get(t)))
+
+
 def public_toolset_list(public_toolsets: Iterable[str], public_tools: Iterable[str],
                         servers: Optional[Set[str]] = None) -> List[str]:
     """What ``toolsets_for_source`` returns for a non-admin sender."""
+    public_tools = list(public_tools)
     names = [t for t in dict.fromkeys(public_toolsets) if t and t not in ADMIN_ONLY_TOOLS]
     if public_tools and ensure_public_toolset(public_tools):
         names.append(PUBLIC_TOOLSET)
-    elif public_tools:
-        # No runtime toolset: enable the chosen tools' whole MCP servers; the hook trims the rest.
-        try:
-            from tools import mcp_tool as core
-            for tool in public_tools:
-                server = core._mcp_tool_server_names.get(tool)
-                if server:
-                    names.append(f"mcp-{server}")
-        except Exception:
-            pass
+    # MCP tools only exist in a session whose list names their server. Name just those servers;
+    # the pre_tool_call hook blocks that server's other tools.
+    names += mcp_servers_for(public_tools)
     names = list(dict.fromkeys(names)) or ["meshcore"]
     # Without a named MCP server Hermes enables every MCP server for this list. "no_mcp" stops that.
     if not names_mcp_server(names, servers):
