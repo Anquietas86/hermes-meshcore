@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.2
+
+### Fixed
+
+- Public senders can discover the tools the operator opened to them. MCP tools
+  are deferred in Hermes, so an agent only sees them after calling `tool_search`
+  or `tool_describe`; both are core built-ins rather than toolset members, so the
+  Public access picker never listed them and the `pre_tool_call` hook blocked
+  them. They are now always allowed for public senders (metadata-only calls;
+  execution is still vetoed) and stay out of `MESHCORE_PUBLIC_TOOLS` so a card
+  save cannot drop them.
+
 ## 2.1.1
 
 ### Fixed

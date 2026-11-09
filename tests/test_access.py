@@ -56,7 +56,17 @@ class PolicyTests(unittest.TestCase):
         import toolsets
         self.assertEqual(toolsets.TOOLSETS[access.PUBLIC_TOOLSET]["tools"], ["mcp_openhop_status"])
         self.assertEqual(access.allowed_public_tools(["meshcore", "web"], ["mcp_openhop_status"]),
-                         {"meshcore_contact", "meshcore_nearby", "web_search", "web_extract", "mcp_openhop_status"})
+                         {"meshcore_contact", "meshcore_nearby", "web_search", "web_extract",
+                          "mcp_openhop_status", "tool_search", "tool_describe"})
+
+    def test_discovery_tools_always_allowed(self):
+        # Deferred MCP tools are invisible without tool_search/tool_describe, and neither is a
+        # toolset member, so the picker cannot list them; they must be implicit or every picked
+        # MCP tool is unreachable for public senders.
+        self.assertTrue({"tool_search", "tool_describe"} <= access.allowed_public_tools([], []))
+        self.assertNotIn("tool_search", access.public_toolset_list(["meshcore"], [], servers=set()))
+        self.assertNotIn("meshcore_admin", access.allowed_public_tools([], ["meshcore_admin"]))
+
 
 
 class HookTests(AdapterTestBase):
