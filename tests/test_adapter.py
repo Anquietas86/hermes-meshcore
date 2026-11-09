@@ -156,6 +156,7 @@ class InboundTests(AdapterTestBase):
         self.assertFalse(ev.allow_gateway_control)
         self.assertIn('from "Bob"', ev.channel_prompt)
         self.assertIn("NOT your operator", ev.channel_prompt)
+        self.assertFalse(getattr(ev, "metadata", None))  # Hermes refuses unknown metadata
 
     async def test_admin_dm(self):
         await self.connect()

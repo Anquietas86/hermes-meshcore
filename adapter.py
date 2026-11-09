@@ -77,7 +77,7 @@ except TypeError:
     _EVENT_HAS_CONTEXT = False
 
 PLATFORM_NAME = "meshcore"
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 
 KEEPALIVE_INTERVAL = 30.0
 KEEPALIVE_TIMEOUT = 8.0
@@ -973,7 +973,9 @@ class MeshCoreAdapter(BasePlatformAdapter):
             source=source,
             message_id=f"{chat_id}:{msg.get('sender_timestamp')}",
             channel_prompt=prompt,
-            metadata={"meshcore": {k: msg.get(k) for k in ("snr", "hops", "sender_timestamp", "txt_type")}},
+            # No ``metadata``: current Hermes refuses native events whose metadata isn't
+            # its own (session_envelope._native_metadata), and the radio details are in
+            # channel_prompt anyway.
             timestamp=datetime.now(),
         )
         # Only admins may drive gateway slash-commands from the mesh.
