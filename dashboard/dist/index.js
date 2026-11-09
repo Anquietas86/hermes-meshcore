@@ -102,14 +102,14 @@
   }
 
   // ── Contacts ──────────────────────────────────────────────────────────
-  function ContactsCard() {
+  function ContactsCard(props) {
     var _a = useState([]), contacts = _a[0], setContacts = _a[1];
     var _b = useState(""), q = _b[0], setQ = _b[1];
     var _c = useState(null), err = _c[0], setErr = _c[1];
     useEffect(function () {
       api("/contacts").then(function (d) { setContacts(d.contacts || []); setErr(null); })
         .catch(function (e) { setErr(errText(e)); });
-    }, []);
+    }, [props.connected]);  // reload once the gateway (re)connects
     var ql = q.toLowerCase();
     var shown = contacts.filter(function (c) {
       return !ql || (c.name || "").toLowerCase().indexOf(ql) >= 0 || (c.pubkey || "").indexOf(ql) === 0;
@@ -276,7 +276,7 @@
   ];
   var TOGGLES = [{ key: "enable_dms", label: "Answer DMs" }, { key: "allow_all_users", label: "Allow everyone (dev only)" }];
 
-  function SettingsCard() {
+  function SettingsCard(props) {
     var _a = useState(null), cfg = _a[0], setCfg = _a[1];
     var _b = useState({}), edits = _b[0], setEdits = _b[1];
     var _c = useState(null), msg = _c[0], setMsg = _c[1];
@@ -288,7 +288,7 @@
       api("/contacts").then(function (d) {
         setPeople((d.contacts || []).filter(function (c) { return c.type === "client"; }));
       }).catch(function () {});
-    }, []);
+    }, [props.connected]);
     if (!cfg) return h(Card, { title: "⚙️ Settings" }, msg || "Loading…");
     function val(k) { return Object.prototype.hasOwnProperty.call(edits, k) ? edits[k] : (cfg[k] || ""); }
     function set(k, v) { var n = Object.assign({}, edits); n[k] = v; setEdits(n); }
@@ -305,13 +305,23 @@
         else setMsg("❌ " + r.host + ":" + r.port + ": " + r.error);
       }).catch(function (e) { setMsg(errText(e)); }).then(function () { setBusy(false); });
     }
+    function strangers(k) {
+      // Keys in a pubkey list that match none of the node's client contacts.
+      if (!people.length || (k !== "admin_nodes" && k !== "allowed_users")) return [];
+      return String(val(k) || "").toLowerCase().split(",").map(function (s) { return s.trim(); }).filter(function (key) {
+        return key && !people.some(function (c) { return c.pubkey.indexOf(key) === 0; });
+      });
+    }
     function field(f) {
+      var odd = strangers(f.key);
       return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
-        h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }));
+        h("input", { className: "mc-input", value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }),
+        odd.length > 0 && h("div", { className: "mc-msg", style: { color: "var(--color-destructive,#dc2626)" } },
+          "⚠️ Not in the node's contacts: " + odd.join(", ")));
     }
     function targetField(f) {
       var v = String(val(f.key) || "").trim().toLowerCase();
-      var unknown = v.indexOf("dm:") === 0 && people.length && !people.some(function (c) { return c.pubkey.indexOf(v.slice(3)) === 0; });
+      var unknown = v.indexOf("dm:") === 0 && people.length > 0 && !people.some(function (c) { return c.pubkey.indexOf(v.slice(3)) === 0; });
       return h("div", { key: f.key, className: "mc-field" }, h("label", null, f.label),
         h("div", { style: { display: "flex", gap: ".5rem" } },
           h("input", { className: "mc-input", style: { flex: 1 }, value: val(f.key), placeholder: f.hint, onChange: function (e) { set(f.key, e.target.value); } }),
@@ -370,8 +380,8 @@
         h(StatusCard, { data: data }),
         h(AdminCard, { adminEnabled: adminEnabled }),
         h(ChannelsCard, { data: data }),
-        h(ContactsCard, null),
-        h(SettingsCard, null)));
+        h(ContactsCard, { connected: !!data.connected }),
+        h(SettingsCard, { connected: !!data.connected })));
   }
 
   window.__HERMES_PLUGINS__.register(PLUGIN_NAME, MeshCorePage);

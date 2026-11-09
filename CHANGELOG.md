@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+
+- The dashboard's contact list and contact picker reload when the gateway
+  reconnects, instead of staying on "Gateway not connected" after a
+  restart.
+- A stray "0" no longer appears under the home channel field.
+
+### Added
+
+- The admin node and allowed sender fields warn about keys that aren't in
+  the node's contacts.
+
 ## 2.0.1
 
 ### Fixed
