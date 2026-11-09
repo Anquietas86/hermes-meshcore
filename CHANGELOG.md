@@ -1,5 +1,94 @@
 # Changelog
 
+## 2.0.0
+
+A ground-up rebuild against the current Hermes platform plugin contract.
+
+### Fixed
+
+- Reconnects no longer cancel themselves. On link loss the adapter reports a
+  retryable fatal error and lets the gateway's reconnect watcher rebuild it.
+  The old silence watchdog only ever fired once.
+- Remote queries return as soon as the repeater answers, instead of always
+  waiting out the full timeout. Replies are matched by tag.
+- DMs and channel messages that arrive during a remote query are no longer
+  swallowed.
+- DM text containing a colon is no longer cut at the colon.
+- Repeater CLI replies (`txt_type` 1) no longer reach the agent as chat.
+- The `all` command works, and logs in once.
+- Commands that silently returned the status block (`ver`, `board`,
+  `get …`) have been removed.
+- Tools and the dashboard no longer pick up another profile's adapter or
+  state.
+- The `meshcore_contact` and `meshcore_admin` tools now exist in CLI and TUI
+  sessions (`provides_tools`).
+- The dashboard backend imports when Hermes loads it standalone. Config
+  writes are validated (no `.env` injection), and the restart button no
+  longer blocks the dashboard.
+- Replies are split once, by bytes, with room for the node name on channels.
+- Disconnecting no longer hangs on Python 3.11, where `asyncio.wait_for`
+  could swallow a cancellation and stall the gateway's reconnect.
+
+### Added
+
+- Gateway-side allowlist integration: `MESHCORE_GROUP_ALLOWED_CHATS`,
+  resolution of short pubkey prefixes, and pairing codes never broadcast
+  when an allowlist is set.
+- Cron and `hermes send` delivery through the running gateway (standalone
+  sender).
+- A scoped lock, so two profiles cannot fight over one node.
+- `MESHCORE_PUBLIC_TOOLSETS`, `MESHCORE_ADMIN_TOOLSETS`,
+  `MESHCORE_MAX_MESSAGE_BYTES`, `MESHCORE_MAX_CHUNKS` and
+  `MESHCORE_ADVERT_ON_START`.
+- Every message tells the model who sent it, and whether that sender is the
+  operator (verified by radio key). This stops the model treating everyone
+  on a public channel as the operator, using the operator's name, or
+  repeating their memory and profile. The README covers the stronger fix: a
+  separate profile with memory turned off.
+- Multi-part replies no longer lose parts:
+  - Parts are paced by LoRa airtime instead of a fixed 1 second, so the next
+    part isn't sent while repeaters are still relaying the last one.
+  - Replies are sent one at a time, never interleaved.
+  - DM parts wait for the recipient's ACK and are retried once over a flood
+    route if none arrives.
+- Only final answers go over the air. The platform declares Hermes's
+  "minimal" display tier, so there are no tool-progress, streaming, interim,
+  reasoning, long-running or busy-ack messages.
+- A per-sender rate limit (`MESHCORE_RATE_LIMIT`, default 6 per 10 minutes).
+  Admins are exempt.
+- Recent channel messages go along with a mention as context
+  (`MESHCORE_CHANNEL_CONTEXT`).
+- `meshcore_nearby` tool: the nearest repeaters or nodes, by advert position.
+- Repeater watch (`MESHCORE_WATCH_*`): DMs you when a watched repeater stops
+  advertising or reports a low battery, and when it recovers.
+- Add and remove channels on the node from the dashboard. Hashtag channels
+  derive their key from the name; private channels take a key or get a
+  random one.
+- Experimental USB serial support (`MESHCORE_HOST=serial:/dev/ttyUSB0`).
+- `@[Name]` mentions, as sent by the MeshCore app.
+- New remote commands: `telemetry`, `acl` and `regions`, with parsed output.
+- A new test suite with a fake companion node over TCP, and CI that runs it.
+
+### Breaking changes and migration
+
+- `channel:N` entries in `MESHCORE_ALLOWED_USERS` are no longer honoured by
+  the gateway's allowlist. Move them to `MESHCORE_GROUP_ALLOWED_CHATS`. A
+  warning is logged until you do.
+- Admins now get the profile's own `platform_toolsets.meshcore` instead of a
+  hard-coded list. Set `MESHCORE_ADMIN_TOOLSETS` to pin one.
+- Public senders can no longer run gateway slash commands.
+- `meshcore_admin_query` is merged into `meshcore_admin`. The command names
+  are now `status`, `telemetry`, `neighbours`, `acl`, `owner`, `clock`,
+  `regions` and `all`. Old spellings that map to the same data
+  (`neighbors`, `stats-core`, `req_status`, …) still work.
+- `MESHCORE_ADMIN_NODES` entries shorter than 8 hex characters are ignored.
+- The dashboard no longer accepts repeater passwords, because they would
+  have to be written to disk. Use guest access, or ask the agent from an
+  admin DM.
+- The dashboard step is now `hermes plugins enable meshcore-platform`. The
+  old `dashboard.trusted_plugin_apis` setting never existed in Hermes and can
+  be removed.
+
 ## 1.11.0
 
 - Support Hermes singular multiplexed gateways with a per-profile adapter registry.
