@@ -19,3 +19,15 @@ def register(ctx) -> None:
         logger.warning("MeshCore: failed to register tools", exc_info=True)
     from .adapter import register_platform
     register_platform(ctx)
+    # Enforce the public tool allowlist at call time: Hermes adds MCP servers and other plugins'
+    # toolsets to a platform's tool list on its own, so the list alone is not a boundary.
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        try:
+            from .access import pre_tool_call
+            register_hook("pre_tool_call", pre_tool_call)
+        except Exception:
+            logger.warning("MeshCore: could not register the tool policy hook", exc_info=True)
+    else:
+        logger.warning("MeshCore: this Hermes has no plugin hooks; public senders' tools are limited "
+                       "by toolset only")

@@ -84,7 +84,7 @@ _HOST = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[?[0-9
                    r"|serial:/dev/[A-Za-z0-9._/-]{1,100})$")
 _PORT = re.compile(r"^(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$")
 _TARGET = re.compile(r"^(?:channel:\d{1,3}|dm:[0-9a-f]{8,64})$")
-_KEEP_CASE = {"host"}  # serial device paths are case-sensitive
+_KEEP_CASE = {"host", "public_tools"}  # serial device paths and MCP tool names are case-sensitive
 
 # dashboard key -> (env var, validator, normaliser)
 CONFIG_FIELDS: Dict[str, tuple] = {
@@ -101,6 +101,7 @@ CONFIG_FIELDS: Dict[str, tuple] = {
     "enable_dms": ("MESHCORE_ENABLE_DMS", _BOOL),
     "allow_all_users": ("MESHCORE_ALLOW_ALL_USERS", _BOOL),
     "public_toolsets": ("MESHCORE_PUBLIC_TOOLSETS", re.compile(r"^[a-z0-9_-]{1,40}(?:,[a-z0-9_-]{1,40})*$")),
+    "public_tools": ("MESHCORE_PUBLIC_TOOLS", re.compile(r"^[A-Za-z0-9_.:-]{1,128}(?:,[A-Za-z0-9_.:-]{1,128})*$")),
 }
 
 
@@ -179,6 +180,7 @@ def _current_config() -> Dict[str, str]:
 def _public_state() -> Dict[str, Any]:
     snap = state.read_state()
     snap.pop("contacts_list", None)
+    (snap.get("public_access") or {}).pop("catalog", None)  # large; served by /tools
     home = _meshcore_home()
     snap["profile"] = home.name if home.parent.name == "profiles" else "default"
     return snap
@@ -187,6 +189,23 @@ def _public_state() -> Dict[str, Any]:
 @router.get("/status")
 async def get_status():
     return JSONResponse(_public_state())
+
+
+@router.get("/tools")
+async def get_tools():
+    """What the gateway can offer public senders, and what is open to them now."""
+    snap = state.read_state()
+    access = snap.get("public_access") or {}
+    cfg = _current_config()
+    return JSONResponse({
+        "connected": bool(snap.get("connected")),
+        "catalog": access.get("catalog") or [],
+        "effective_toolsets": access.get("toolsets") or [],
+        "effective_tools": access.get("tools") or [],
+        "allowed": access.get("allowed") or [],
+        "public_toolsets": cfg.get("public_toolsets", ""),
+        "public_tools": cfg.get("public_tools", ""),
+    })
 
 
 @router.get("/health")
