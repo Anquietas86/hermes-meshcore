@@ -1,60 +1,123 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 1.11.0
+version: 2.0.0
 description: >
-  MeshCore gateway adapter for Hermes Agent.
-  Connects to a MeshCore companion radio node via TCP and relays
-  channel messages and DMs to the Hermes agent. Uses the raw binary
-  protocol directly — zero external dependencies.
-author: Nous Research
+  MeshCore LoRa mesh platform for Hermes Agent. Talks to a MeshCore
+  companion radio over TCP and relays channel messages and DMs to the
+  agent. Speaks the companion binary protocol directly (stdlib only).
+author: Josh Hagger
+provides_tools:
+  - meshcore_contact
+  - meshcore_nearby
+  - meshcore_admin
 requires_env:
   - name: MESHCORE_HOST
-    description: "MeshCore node TCP hostname (e.g. mchome)"
+    description: "Companion node hostname or IP (TCP), or serial:/dev/ttyUSB0 for USB (experimental)"
     prompt: "MeshCore host"
     password: false
+optional_env:
   - name: MESHCORE_PORT
-    description: "MeshCore node TCP port (default: 5000)"
+    description: "Companion node TCP port (default 5000)"
     prompt: "MeshCore port"
     password: false
-optional_env:
-  - name: MESHCORE_BOT_NAME
-    description: "Override bot name for @mention matching (auto-derived from node name if unset)"
-    prompt: "Bot display name"
-    password: false
-  - name: MESHCORE_ADMIN_NODES
-    description: "Comma-separated pubkey prefixes for admin access (full tools, sensitive info)"
-    prompt: "Admin node pubkey prefixes"
-    password: false
-  - name: MESHCORE_ADMIN_CHANNELS
-    description: "Comma-separated channel indexes trusted for admin-level replies (empty = no channels trusted)"
-    prompt: "Admin channel indexes"
-    password: false
-  - name: MESHCORE_MONITOR_CHANNELS
-    description: "Comma-separated channel indexes to monitor (empty = discover all, respond to none until enabled)"
-    prompt: "Channel indexes to monitor"
-    password: false
-  - name: MESHCORE_ENABLE_DMS
-    description: "Respond to direct messages (true/false, default: true)"
-    prompt: "Enable DMs?"
-    password: false
   - name: MESHCORE_ALLOWED_USERS
-    description: "Comma-separated pubkey prefixes allowed to talk to the bot (empty = allow all)"
+    description: "Pubkeys or 12+ hex-char prefixes allowed to DM the bot. Set this: with no allowlist Hermes denies everyone and answers unknown DMs with a pairing code over the air"
     prompt: "Allowed pubkey prefixes"
     password: false
-  - name: MESHCORE_ALLOW_ALL_USERS
-    description: "Allow anyone to talk to the bot (dev only)"
-    prompt: "Allow all users? (true/false)"
+  - name: MESHCORE_GROUP_ALLOWED_CHATS
+    description: "Channels whose members may all talk to the bot, e.g. channel:1,channel:3"
+    prompt: "Open channels"
     password: false
-  - name: MESHCORE_HOME_CHANNEL
-    description: "Channel index for cron / notification delivery"
-    prompt: "Home channel index"
+  - name: MESHCORE_ALLOW_ALL_USERS
+    description: "Let anyone on the mesh talk to the bot (true/false, default false)"
+    prompt: "Allow all users?"
+    password: false
+  - name: MESHCORE_MONITOR_CHANNELS
+    description: "Channel indexes the bot listens and answers in, e.g. 1,2 (empty = DMs only)"
+    prompt: "Channels to answer in"
     password: false
   - name: MESHCORE_REQUIRE_MENTION
-    description: "In channels, require @bot-name mention to respond (true/false, default: true)"
-    prompt: "Require @mention in channels?"
+    description: "Channels that need an @mention: true = every monitored channel, 0,2 = only those, empty = none"
+    prompt: "Require @mention"
+    password: false
+  - name: MESHCORE_ENABLE_DMS
+    description: "Answer direct messages (default true)"
+    prompt: "Enable DMs?"
+    password: false
+  - name: MESHCORE_ADMIN_NODES
+    description: "Operator pubkeys or 8+ hex-char prefixes; their DMs get the profile's full toolsets and remote repeater queries"
+    prompt: "Admin pubkey prefixes"
+    password: false
+  - name: MESHCORE_ADMIN_CHANNELS
+    description: "Channel indexes treated as trusted (admin toolsets). Anyone with the channel key can post there"
+    prompt: "Admin channel indexes"
+    password: false
+  - name: MESHCORE_PUBLIC_TOOLSETS
+    description: "Toolsets for non-admin senders (default meshcore)"
+    prompt: "Public toolsets"
+    password: false
+  - name: MESHCORE_ADMIN_TOOLSETS
+    description: "Pin an explicit toolset list for admins (default: the profile's own platform_toolsets)"
+    prompt: "Admin toolsets"
+    password: false
+  - name: MESHCORE_HOME_CHANNEL
+    description: "Where cron and notifications go: channel:N or dm:<pubkey prefix>"
+    prompt: "Home channel"
+    password: false
+  - name: MESHCORE_BOT_NAME
+    description: "Name matched for @mentions (default: the node's advert name)"
+    prompt: "Bot name"
+    password: false
+  - name: MESHCORE_MAX_MESSAGE_BYTES
+    description: "Bytes per packet for replies, 40-200 (default 130)"
+    prompt: "Max bytes per packet"
+    password: false
+  - name: MESHCORE_MAX_CHUNKS
+    description: "Maximum packets per reply; longer replies are truncated (default 6)"
+    prompt: "Max packets per reply"
+    password: false
+  - name: MESHCORE_ADVERT_ON_START
+    description: "Send a flood advert when the gateway starts (default true)"
+    prompt: "Advert on start?"
     password: false
   - name: MESHCORE_DEBUG
-    description: "Enable packet-level debug logging for troubleshooting (true/false, default: false)"
-    prompt: "Enable packet debugging?"
+    description: "Log every frame for troubleshooting (default false)"
+    prompt: "Debug logging?"
+    password: false
+  - name: MESHCORE_RATE_LIMIT
+    description: "Messages each non-admin sender may send per window, e.g. 6/10m (default). off disables"
+    prompt: "Rate limit"
+    password: false
+  - name: MESHCORE_CHANNEL_CONTEXT
+    description: "Recent channel messages passed along when the bot is mentioned (default 6, 0 = off)"
+    prompt: "Channel context messages"
+    password: false
+  - name: MESHCORE_CHUNK_DELAY
+    description: "Seconds between reply packets; default auto (from LoRa airtime, DM parts wait for ACKs)"
+    prompt: "Delay between packets"
+    password: false
+  - name: MESHCORE_WATCH_NODES
+    description: "Repeaters to watch (names or pubkey prefixes); alerts when one goes quiet or its battery runs low"
+    prompt: "Repeaters to watch"
+    password: false
+  - name: MESHCORE_WATCH_NOTIFY
+    description: "Where watch alerts go: channel:N or dm:<prefix> (default home channel, else your admin node)"
+    prompt: "Watch alerts to"
+    password: false
+  - name: MESHCORE_WATCH_INTERVAL_MINUTES
+    description: "Minutes between watch checks (default 60)"
+    prompt: "Watch interval"
+    password: false
+  - name: MESHCORE_WATCH_SILENT_HOURS
+    description: "Alert when no advert has been heard for this many hours (default 12)"
+    prompt: "Silent after hours"
+    password: false
+  - name: MESHCORE_WATCH_BATTERY_MV
+    description: "Alert below this battery voltage in mV (default 3500, 0 = off)"
+    prompt: "Low battery mV"
+    password: false
+  - name: MESHCORE_WATCH_STATUS
+    description: "Query each watched repeater's status (guest login) on every check (default true)"
+    prompt: "Query status?"
     password: false
