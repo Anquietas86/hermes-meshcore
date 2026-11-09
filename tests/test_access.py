@@ -36,6 +36,20 @@ class PolicyTests(unittest.TestCase):
         finally:
             toolsets.TOOLSETS["meshcore"] = saved
 
+    def test_chosen_mcp_tools_bring_only_their_server(self):
+        core = types.SimpleNamespace(_mcp_tool_server_names={"mcp__homeassistant__ha_get_state": "homeassistant",
+                                                             "mcp_openhop_reboot": "openhop"})
+        tools_pkg = types.ModuleType("tools")
+        tools_pkg.mcp_tool = core
+        saved = {k: sys.modules.get(k) for k in ("tools", "tools.mcp_tool")}
+        sys.modules.update({"tools": tools_pkg, "tools.mcp_tool": core})
+        try:
+            names = access.public_toolset_list(["meshcore", "web"], ["mcp__homeassistant__ha_get_state"])
+        finally:
+            for k, v in saved.items():
+                sys.modules.pop(k, None) if v is None else sys.modules.__setitem__(k, v)
+        self.assertEqual(names, ["meshcore", "web", access.PUBLIC_TOOLSET, "mcp-homeassistant"])
+
     def test_chosen_tools_become_a_toolset(self):
         names = access.public_toolset_list(["meshcore"], ["mcp_openhop_status"], servers=set())
         self.assertIn(access.PUBLIC_TOOLSET, names)

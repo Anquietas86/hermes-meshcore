@@ -197,7 +197,7 @@ Ticked tools are saved to `MESHCORE_PUBLIC_TOOLS` and apply after a
 gateway restart. Whole toolsets still go in `MESHCORE_PUBLIC_TOOLSETS`.
 
 This is enforced in two places. The tool list handed to Hermes for a
-public sender leaves out MCP servers unless you name one, and a
+public sender leaves out MCP servers except the ones behind tools you picked, and a
 `pre_tool_call` hook blocks any tool outside the public list in a
 non-admin MeshCore session, whatever Hermes enabled. If that check
 itself fails, it blocks.
