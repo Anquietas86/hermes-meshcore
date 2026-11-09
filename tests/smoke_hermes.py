@@ -96,7 +96,9 @@ async def main() -> None:
         event = events[0]
         assert event.text == "hello: mesh", event.text
         assert event.source.chat_id == "dm:" + fn.FakeNode.BOB[:12]
-        assert adapter.toolsets_for_source(event.source) == ["meshcore"]
+        assert adapter.toolsets_for_source(event.source) == ["meshcore", "web"]
+        from toolsets import TOOLSETS
+        assert "web" in TOOLSETS, "Hermes no longer has a 'web' toolset"
         # The gateway's admission check refuses events it can't persist ("Hermes refused this
         # message (invalid_params)"). Run the same per-event checks it runs.
         try:

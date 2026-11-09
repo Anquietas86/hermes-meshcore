@@ -272,7 +272,8 @@
     { key: "group_allowed_chats", label: "Channels anyone may use", hint: "channel:1,channel:2" },
     { key: "admin_channels", label: "Trusted admin channels", hint: "e.g. 3" },
     { key: "admin_nodes", label: "Admin node pubkeys (12+ hex chars)", hint: "a1b2c3d4e5f6" },
-    { key: "allowed_users", label: "Allowed DM senders (12+ hex chars)", hint: "a1b2c3d4e5f6,…" }
+    { key: "allowed_users", label: "Allowed DM senders (12+ hex chars)", hint: "a1b2c3d4e5f6,…" },
+    { key: "public_toolsets", label: "Tools for everyone else (read-only lookups)", hint: "meshcore,web (default)" }
   ];
   var TOGGLES = [{ key: "enable_dms", label: "Answer DMs" }, { key: "allow_all_users", label: "Allow everyone (dev only)" }];
 
