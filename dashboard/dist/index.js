@@ -1,5 +1,5 @@
 /**
- * MeshCore dashboard tab: node status, contacts, remote repeater queries and settings.
+ * MeshCore dashboard tab: node status, channels, contacts, remote repeater queries and settings.
  * Talks to /api/plugins/meshcore-platform/* through SDK.fetchJSON (which adds dashboard auth).
  * Plain React.createElement, no build step.
  */
@@ -180,6 +180,80 @@
     );
   }
 
+  // ── Channels on the node ───────────────────────────────────────────────
+  function waitFor(requestId, onDone) {
+    var tries = 0;
+    var t = setInterval(function () {
+      tries += 1;
+      api("/admin/result?request_id=" + encodeURIComponent(requestId)).then(function (res) {
+        if (res.status === "complete") { clearInterval(t); onDone(res.result || {}); }
+        else if (tries > 30) { clearInterval(t); onDone({ error: "No answer from the gateway yet" }); }
+      }).catch(function (e) { clearInterval(t); onDone({ error: errText(e) }); });
+    }, 1000);
+  }
+
+  function ChannelsCard(props) {
+    var d = props.data, channels = d.channels || {}, max = d.max_channels || 8;
+    var monitored = ((d.config || {}).monitor_channels || []).map(String);
+    var used = Object.keys(channels);
+    var free = [];
+    for (var i = 0; i < max; i++) if (used.indexOf(String(i)) < 0) free.push(String(i));
+    var _a = useState(""), idx = _a[0], setIdx = _a[1];
+    var _b = useState(""), name = _b[0], setName = _b[1];
+    var _c = useState(""), key = _c[0], setKey = _c[1];
+    var _d = useState(null), msg = _d[0], setMsg = _d[1];
+    var _e = useState(false), busy = _e[0], setBusy = _e[1];
+    var slot = idx || free[0] || "";
+    var hashtag = name.trim().charAt(0) === "#";
+    function finish(r) {
+      setBusy(false);
+      if (r.success === false || r.error) { setMsg("Failed: " + (r.error || "unknown error")); return; }
+      var text = r.name ? "Channel " + r.index + " set to " + r.name + "." : "Channel " + r.index + " removed.";
+      if (r.channel_key) text += " Private key (share it with members): " + r.channel_key;
+      if (r.hint) text += " " + r.hint;
+      setMsg(text);
+    }
+    function add() {
+      setBusy(true); setMsg("Updating the node…");
+      post("/channels", { index: Number(slot), name: name.trim(), channel_key: hashtag ? "" : key.trim() })
+        .then(function (r) { setName(""); setKey(""); setIdx(""); waitFor(r.request_id, finish); })
+        .catch(function (e) { setBusy(false); setMsg(errText(e)); });
+    }
+    function remove(i) {
+      if (!window.confirm("Remove channel " + i + " (" + channels[i] + ") from the node?")) return;
+      setBusy(true); setMsg("Updating the node…");
+      post("/channels/remove", { index: Number(i) })
+        .then(function (r) { waitFor(r.request_id, finish); })
+        .catch(function (e) { setBusy(false); setMsg(errText(e)); });
+    }
+    return h(Card, { title: "📻 Channels" },
+      h("table", { className: "mc-table" },
+        h("thead", null, h("tr", null, ["#", "Name", "Bot answers", ""].map(function (t) { return h("th", { key: t }, t); }))),
+        h("tbody", null, used.map(function (i) {
+          return h("tr", { key: i },
+            h("td", null, i), h("td", null, channels[i]),
+            h("td", null, monitored.indexOf(i) >= 0 ? "yes" : "no"),
+            h("td", null, h("button", { className: "mc-btn", disabled: busy || !d.connected, onClick: function () { remove(i); } }, "Remove")));
+        }))),
+      h("div", { className: "mc-field", style: { marginTop: ".75rem" } },
+        h("label", null, "Add a channel"),
+        h("div", { className: "mc-actions" },
+          h("select", { className: "mc-input", style: { width: "5rem" }, value: slot, onChange: function (e) { setIdx(e.target.value); } },
+            (free.length ? free : used).map(function (i) { return h("option", { key: i, value: i }, i + (channels[i] ? " (replace)" : "")); })),
+          h("input", { className: "mc-input", style: { flex: 1 }, placeholder: "#hashtag or private channel name", value: name,
+            onChange: function (e) { setName(e.target.value); } }))),
+      !hashtag && name.trim() && h("div", { className: "mc-field" },
+        h("label", null, "Private channel key (32 hex chars). Leave empty to create a new channel"),
+        h("input", { className: "mc-input mc-mono", value: key, placeholder: "0123456789abcdef0123456789abcdef",
+          onChange: function (e) { setKey(e.target.value); } })),
+      h("div", { className: "mc-actions" },
+        h("button", { className: "mc-btn", onClick: add, disabled: busy || !d.connected || !name.trim() || slot === "" }, "➕ Save to node")),
+      h("div", { className: "mc-msg" }, "Hashtag channels get their key from the exact name, so match the spelling and case others use. " +
+        "Use Settings to choose which channels the bot answers in."),
+      msg && h("div", { className: "mc-msg" }, msg)
+    );
+  }
+
   // ── Settings ──────────────────────────────────────────────────────────
   var FIELDS = [
     { key: "monitor_channels", label: "Channels to answer in (indexes)", hint: "1,2" },
@@ -249,6 +323,7 @@
       h("div", { className: "mc-grid" },
         h(StatusCard, { data: data }),
         h(AdminCard, { adminEnabled: adminEnabled }),
+        h(ChannelsCard, { data: data }),
         h(ContactsCard, null),
         h(SettingsCard, null)));
   }

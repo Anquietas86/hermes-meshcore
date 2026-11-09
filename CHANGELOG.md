@@ -26,6 +26,8 @@ A ground-up rebuild against the current Hermes platform plugin contract.
   writes are validated (no `.env` injection), and the restart button no
   longer blocks the dashboard.
 - Replies are split once, by bytes, with room for the node name on channels.
+- Disconnecting no longer hangs on Python 3.11, where `asyncio.wait_for`
+  could swallow a cancellation and stall the gateway's reconnect.
 
 ### Added
 
@@ -59,6 +61,9 @@ A ground-up rebuild against the current Hermes platform plugin contract.
 - `meshcore_nearby` tool: the nearest repeaters or nodes, by advert position.
 - Repeater watch (`MESHCORE_WATCH_*`): DMs you when a watched repeater stops
   advertising or reports a low battery, and when it recovers.
+- Add and remove channels on the node from the dashboard. Hashtag channels
+  derive their key from the name; private channels take a key or get a
+  random one.
 - Experimental USB serial support (`MESHCORE_HOST=serial:/dev/ttyUSB0`).
 - `@[Name]` mentions, as sent by the MeshCore app.
 - New remote commands: `telemetry`, `acl` and `regions`, with parsed output.

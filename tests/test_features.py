@@ -222,6 +222,66 @@ class WatchTests(AdapterTestBase):
         self.assertTrue(any(b"no advert heard" in x for x in self.node.sent(p.CMD_SEND_CHANNEL_TXT_MSG)))
 
 
+class ChannelPlanTests(unittest.TestCase):
+    def test_hashtag(self):
+        import hashlib
+        plan = A.plan_channel(3, "#hermes", "", 8)
+        self.assertEqual(plan["key"], hashlib.sha256(b"#hermes").digest()[:16])
+        self.assertNotIn("generated", plan)
+        self.assertIn("error", A.plan_channel(3, "#hermes", "00" * 16, 8))
+
+    def test_private(self):
+        self.assertEqual(A.plan_channel(2, "Family", "AB" * 16, 8)["key"], bytes.fromhex("ab" * 16))
+        generated = A.plan_channel(2, "Family", "", 8)
+        self.assertTrue(generated["generated"])
+        self.assertEqual(len(generated["key"]), 16)
+        self.assertIn("error", A.plan_channel(2, "Family", "xyz", 8))
+
+    def test_bounds(self):
+        self.assertIn("error", A.plan_channel(8, "#a", "", 8))
+        self.assertIn("error", A.plan_channel(-1, "#a", "", 8))
+        self.assertIn("error", A.plan_channel("x", "#a", "", 8))
+        self.assertIn("error", A.plan_channel(1, "", "", 8))
+        self.assertIn("error", A.plan_channel(1, "#", "", 8))
+        self.assertIn("error", A.plan_channel(1, "x" * 40, "", 8))
+        self.assertEqual(A.plan_channel(1, "  two   words ", "", 8)["name"], "two words")
+
+
+class ChannelManagementTests(AdapterTestBase):
+    async def test_add_hashtag_and_remove(self):
+        import hashlib
+        await self.connect()
+        result = await self.adapter.set_channel(4, "#adelaide")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(self.node.channels[4], ("#adelaide", hashlib.sha256(b"#adelaide").digest()[:16]))
+        self.assertEqual(self.adapter._channels[4], "#adelaide")
+        self.assertIn("MESHCORE_MONITOR_CHANNELS", result["hint"])
+        self.assertNotIn("channel_key", result)
+        removed = await self.adapter.remove_channel(4)
+        self.assertTrue(removed["success"])
+        self.assertNotIn(4, self.node.channels)
+        self.assertNotIn(4, self.adapter._channels)
+
+    async def test_new_private_channel_returns_key(self):
+        await self.connect()
+        result = await self.adapter.set_channel(5, "Family")
+        self.assertEqual(bytes.fromhex(result["channel_key"]), self.node.channels[5][1])
+
+    async def test_removing_monitored_channel_warns(self):
+        await self.connect()
+        result = await self.adapter.remove_channel(1)
+        self.assertIn("still listed", result["hint"])
+
+    async def test_via_ipc(self):
+        await self.connect()
+        await self.adapter._serve_request("r1", {"kind": "set_channel",
+                                                 "payload": {"index": 6, "name": "Club", "channel_key": "11" * 16}})
+        self.assertEqual(self.node.channels[6], ("Club", bytes.fromhex("11" * 16)))
+        await self.adapter._serve_request("r2", {"kind": "remove_channel", "payload": {"index": 6}})
+        self.assertNotIn(6, self.node.channels)
+        self.assertEqual(self.adapter.snapshot()["max_channels"], 8)
+
+
 @unittest.skipUnless(hasattr(os, "openpty"), "needs a pty")
 class SerialTests(unittest.IsolatedAsyncioTestCase):
     async def test_round_trip_over_a_pty(self):

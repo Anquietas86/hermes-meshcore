@@ -244,6 +244,66 @@ async def get_admin_result(request_id: str = ""):
     return JSONResponse({"status": "pending", "queued": queued})
 
 
+# ── channels on the node ─────────────────────────────────────────────────
+
+def _require_gateway() -> Dict[str, Any]:
+    snap = state.read_state()
+    if not snap.get("fresh") or not snap.get("connected"):
+        raise HTTPException(status_code=503, detail=snap.get("error") or "Gateway not running")
+    return snap
+
+
+def _channel_index(body: Dict[str, Any], snap: Dict[str, Any]) -> int:
+    try:
+        idx = int(body.get("index"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="index must be a number")
+    if not 0 <= idx < int(snap.get("max_channels") or 8):
+        raise HTTPException(status_code=400, detail="index out of range")
+    return idx
+
+
+@router.get("/channels")
+async def get_channels():
+    snap = state.read_state()
+    return JSONResponse({"channels": snap.get("channels") or {}, "max_channels": snap.get("max_channels") or 8,
+                         "monitored": (snap.get("config") or {}).get("monitor_channels") or []})
+
+
+@router.post("/channels")
+async def set_channel(request: Request):
+    """Add or replace a channel slot. The node is changed by the gateway; poll /admin/result."""
+    body = await _json_body(request)
+    snap = _require_gateway()
+    idx = _channel_index(body, snap)
+    name = str(body.get("name", "")).strip()
+    key = re.sub(r"\s+", "", str(body.get("channel_key", "") or ""))
+    if not name or len(name.encode("utf-8")) > 31 or any(ord(ch) < 32 for ch in name):
+        raise HTTPException(status_code=400, detail="name must be 1-31 bytes with no control characters")
+    if key and not re.fullmatch(r"[0-9a-fA-F]{32}", key):
+        raise HTTPException(status_code=400, detail="channel_key must be 32 hex characters")
+    request_id = state.submit_request("set_channel", {"index": idx, "name": name, "channel_key": key.lower()})
+    return JSONResponse({"success": True, "request_id": request_id})
+
+
+@router.post("/channels/remove")
+async def remove_channel(request: Request):
+    body = await _json_body(request)
+    snap = _require_gateway()
+    request_id = state.submit_request("remove_channel", {"index": _channel_index(body, snap)})
+    return JSONResponse({"success": True, "request_id": request_id})
+
+
+async def _json_body(request: Request) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return body
+
+
 @router.post("/advert")
 async def trigger_advert():
     snap = state.read_state()

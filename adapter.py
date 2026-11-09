@@ -18,6 +18,8 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
+import os
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -499,8 +501,12 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._contacts = {c["public_key"]: c for c in contacts}
         self._contacts_dirty = False
 
+    @property
+    def max_channels(self) -> int:
+        return int(self._device.get("max_channels") or 8)
+
     async def _load_channels(self) -> None:
-        wanted = set(range(8)) | self.settings.monitor_channels | self.settings.admin_channels
+        wanted = set(range(self.max_channels)) | self.settings.monitor_channels | self.settings.admin_channels
         for idx in sorted(i for i in wanted if 0 <= i <= 255):
             try:
                 reply = await self._client.request(bytes([p.CMD_GET_CHANNEL, idx]), [p.RESP_CHANNEL_INFO], timeout=5)
@@ -675,6 +681,11 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 result = await self.query_remote(str(payload.get("node", "")), str(payload.get("command", "")))
             elif kind == "advert":
                 result = await self.send_advert(flood=bool(payload.get("flood", True)))
+            elif kind == "set_channel":
+                result = await self.set_channel(payload.get("index"), str(payload.get("name", "")),
+                                                str(payload.get("channel_key", "") or ""))
+            elif kind == "remove_channel":
+                result = await self.remove_channel(payload.get("index"))
             elif kind == "send":
                 sent = await self.send(str(payload.get("chat_id", "")), str(payload.get("message", "")))
                 result = {"success": sent.success, "message_id": sent.message_id, "error": sent.error}
@@ -764,6 +775,58 @@ class MeshCoreAdapter(BasePlatformAdapter):
         result = await self.send(target, text)
         if not result.success:
             logger.warning("MeshCore: watch alert to %s failed: %s", target, result.error)
+
+    # ── channel management ──────────────────────────────────────────────
+
+    async def set_channel(self, index: Any, name: str, key_hex: str = "") -> Dict[str, Any]:
+        """Add or replace a channel slot on the node.
+
+        ``#name`` channels are public hashtag channels whose key is derived
+        from the name. Other names are private channels: pass the 32-hex-char
+        key to join an existing one, or leave it empty to create a new one
+        (the generated key is returned so it can be shared).
+        """
+        plan = plan_channel(index, name, key_hex, self.max_channels)
+        if "error" in plan:
+            return {"success": False, "error": plan["error"]}
+        result = await self._write_channel(plan["index"], plan["name"], plan["key"])
+        if result.get("success") and plan.get("generated"):
+            result["channel_key"] = plan["key"].hex()
+            result["note"] = "New private channel: share this key with the people who should join it."
+        return result
+
+    async def remove_channel(self, index: Any) -> Dict[str, Any]:
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "Channel index must be a number"}
+        if not 0 <= idx < self.max_channels:
+            return {"success": False, "error": f"Channel index must be 0-{self.max_channels - 1}"}
+        return await self._write_channel(idx, "", bytes(16))
+
+    async def _write_channel(self, idx: int, name: str, key: bytes) -> Dict[str, Any]:
+        if self._client is None:
+            return {"success": False, "error": "MeshCore node not connected"}
+        try:
+            reply = await self._client.request(p.cmd_set_channel(idx, name, key), [p.RESP_OK], timeout=10)
+        except p.MeshCoreError as exc:
+            return {"success": False, "error": str(exc)}
+        if reply.code != p.RESP_OK:
+            return {"success": False, "error": f"Node refused: {reply.error_text()}"}
+        if name:
+            self._channels[idx] = name
+        else:
+            self._channels.pop(idx, None)
+            self._recent.pop(idx, None)
+        logger.info("MeshCore: channel %d %s", idx, f"set to {name!r}" if name else "removed")
+        out: Dict[str, Any] = {"success": True, "index": idx, "name": name or None}
+        if name and idx not in self.settings.monitor_channels:
+            out["hint"] = f"Add {idx} to MESHCORE_MONITOR_CHANNELS if the bot should answer there."
+        if not name and idx in self.settings.monitor_channels:
+            out["hint"] = f"Channel {idx} is still listed in MESHCORE_MONITOR_CHANNELS."
+        with contextlib.suppress(Exception):
+            self._write_state()
+        return out
 
     def nearby(self, kind: str = "repeater", limit: int = 10) -> Dict[str, Any]:
         si = self._self_info
@@ -1123,6 +1186,7 @@ class MeshCoreAdapter(BasePlatformAdapter):
             },
             "contacts_list": sorted((contact_summary(c) for c in contacts), key=lambda c: c["name"].lower()),
             "channels": {str(k): v for k, v in sorted(self._channels.items())},
+            "max_channels": self.max_channels,
             "counters": dict(self._counters),
             "config": {
                 "monitor_channels": sorted(s.monitor_channels),
@@ -1138,6 +1202,31 @@ class MeshCoreAdapter(BasePlatformAdapter):
 
     def _write_state(self) -> None:
         state.write_state(self.snapshot(), self._home)
+
+
+def plan_channel(index: Any, name: str, key_hex: str, max_channels: int) -> Dict[str, Any]:
+    """Validate a channel change; returns index/name/key (+generated) or an error."""
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return {"error": "Channel index must be a number"}
+    if not 0 <= idx < max_channels:
+        return {"error": f"Channel index must be 0-{max_channels - 1}"}
+    name = " ".join(str(name or "").split())
+    if not name or name == "#":
+        return {"error": "Channel name is required"}
+    if len(name.encode("utf-8")) > 31:
+        return {"error": "Channel name must be at most 31 bytes"}
+    key_hex = re.sub(r"\s+", "", str(key_hex or "")).lower()
+    if name.startswith("#"):
+        if key_hex:
+            return {"error": "Hashtag channels have no separate key (it comes from the name); leave the key empty"}
+        return {"index": idx, "name": name, "key": p.hashtag_channel_key(name)}
+    if key_hex:
+        if not re.fullmatch(r"[0-9a-f]{32}", key_hex):
+            return {"error": "Private channel key must be 32 hex characters"}
+        return {"index": idx, "name": name, "key": bytes.fromhex(key_hex)}
+    return {"index": idx, "name": name, "key": os.urandom(16), "generated": True}
 
 
 def contact_summary(c: Dict[str, Any]) -> Dict[str, Any]:

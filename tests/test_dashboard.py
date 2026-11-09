@@ -85,6 +85,19 @@ class DashboardTests(unittest.TestCase):
         bad = self.client.get(self.url("/admin/result"), params={"request_id": "../../etc"})
         self.assertEqual(bad.status_code, 400)
 
+    def test_channel_endpoints(self):
+        r = self.client.post(self.url("/channels"), json={"index": 2, "name": "#x"})
+        self.assertEqual(r.status_code, 503)
+        self.api.state.write_state({"connected": True, "max_channels": 8, "channels": {"0": "Public"}})
+        for body in ({"index": 9, "name": "#x"}, {"index": "a", "name": "#x"}, {"index": 2, "name": ""},
+                     {"index": 2, "name": "a\nb"}, {"index": 2, "name": "x", "channel_key": "zz"}):
+            self.assertEqual(self.client.post(self.url("/channels"), json=body).status_code, 400, body)
+        ok = self.client.post(self.url("/channels"), json={"index": 2, "name": "Family", "channel_key": "AB" * 16})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(self.client.post(self.url("/channels/remove"), json={"index": 0}).status_code, 200)
+        listed = self.client.get(self.url("/channels")).json()
+        self.assertEqual((listed["channels"], listed["max_channels"]), ({"0": "Public"}, 8))
+
 
 if __name__ == "__main__":
     unittest.main()

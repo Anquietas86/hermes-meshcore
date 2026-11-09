@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import math
 import os
@@ -52,6 +53,7 @@ CMD_GET_CHANNEL = 0x1F
 CMD_BINARY_REQ = 0x32
 CMD_GET_STATS = 0x38
 CMD_RESET_PATH = 0x0D
+CMD_SET_CHANNEL = 0x20
 CMD_SEND_ANON_REQ = 0x39
 
 # Sub-types for CMD_BINARY_REQ (require a login, guest is fine)
@@ -436,6 +438,22 @@ def cmd_anon_req(pubkey: bytes, sub_type: int, reply_path: bytes) -> bytes:
 
 PushHandler = Callable[[Frame], Awaitable[None]]
 ClosedHandler = Callable[[Optional[BaseException]], Awaitable[None]]
+
+
+def hashtag_channel_key(name: str) -> bytes:
+    """Key of a public hashtag channel: first 16 bytes of sha256 of its exact name (as the apps do)."""
+    return hashlib.sha256(name.encode("utf-8")).digest()[:16]
+
+
+def cmd_set_channel(channel_idx: int, name: str, key: bytes) -> bytes:
+    if not 0 <= channel_idx <= 255:
+        raise ValueError(f"channel index out of range: {channel_idx}")
+    if len(key) != 16:
+        raise ValueError("channel key must be 16 bytes")
+    raw = name.encode("utf-8")
+    if len(raw) > 31:
+        raise ValueError("channel name is longer than 31 bytes")
+    return bytes([CMD_SET_CHANNEL, channel_idx]) + raw.ljust(32, b"\x00") + key
 
 
 def cmd_reset_path(pubkey: bytes) -> bytes:

@@ -56,6 +56,7 @@ class FakeNode:
         self.repeater_replies = True
         self.on_binary_req = None  # hook(sub_type) -> optional side effect
         self.connections = 0
+        self.channels = {0: ("Public", bytes(16)), 1: ("Hermes", bytes(16))}
         self.dm_acks = True       # recipients acknowledge DMs
         self.ack_attempts = set()  # if set, only these attempt numbers get an ACK
         self.ack_delay = 0.05
@@ -137,9 +138,18 @@ class FakeNode:
             out.append(b"\x04" + bytes(4))
         elif code == 0x1F:
             idx = body[0]
-            names = {0: "Public", 1: "Hermes"}
-            out.append(b"\x12" + bytes([idx]) + names[idx].encode().ljust(32, b"\0") + bytes(16)
-                       if idx in names else b"\x01\x02")
+            if idx in self.channels:
+                name, key = self.channels[idx]
+                out.append(b"\x12" + bytes([idx]) + name.encode().ljust(32, b"\0") + key)
+            else:
+                out.append(b"\x01\x02")
+        elif code == 0x20:
+            idx, name, key = body[0], body[1:33].split(b"\0", 1)[0].decode(), body[33:49]
+            if name:
+                self.channels[idx] = (name, key)
+            else:
+                self.channels.pop(idx, None)
+            out.append(b"\x00")
         elif code in (0x07,):
             out.append(b"\x00")
         elif code == 0x0A:
