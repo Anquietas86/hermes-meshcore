@@ -38,7 +38,8 @@ jobs:
           path: hermes-agent
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # Hermes pins its runtime dependencies for Python 3.14+ only.
+          python-version: '3.14'
       - name: Install Hermes
         run: python3 -m pip install --disable-pip-version-check -e ./hermes-agent
       - name: Smoke test against real Hermes
