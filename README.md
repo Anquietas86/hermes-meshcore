@@ -130,6 +130,7 @@ Then restart: `hermes gateway restart`.
 | `MESHCORE_ADMIN_NODES` | | Operator pubkeys (8+ hex chars) |
 | `MESHCORE_ADMIN_CHANNELS` | | Channels treated as trusted. Anyone with the channel key can post there |
 | `MESHCORE_PUBLIC_TOOLSETS` | `meshcore,web` | Toolsets for non-admin senders. Keep them read-only (`meshcore_admin` is always removed) |
+| `MESHCORE_PUBLIC_TOOLS` | | Extra single tools for non-admin senders (for example one read-only MCP tool). Easiest to pick on the dashboard |
 | `MESHCORE_ADMIN_TOOLSETS` | | Pin admin toolsets. Default: the profile's own `platform_toolsets` |
 | `MESHCORE_HOME_CHANNEL` | | `channel:N` or `dm:<prefix>` for cron delivery |
 | `MESHCORE_BOT_NAME` | node name | Name matched for @mentions |
@@ -180,9 +181,26 @@ note says:
 The note also tells the model to help strangers with general information
 (weather, the mesh, propagation, news) and not to change anything on your
 behalf for them. Public senders get read-only tools only (`meshcore` and
-`web` by default), so no `memory`, files, terminal or cron. If your weather
-or propagation lookups come from your own toolset, add its name to
-`MESHCORE_PUBLIC_TOOLSETS`, as long as it only reads.
+`web` by default), so no `memory`, files, terminal, cron or MCP servers.
+
+If your weather, propagation or mesh data comes from an MCP server or
+another plugin, open just the tools you want on the dashboard's **Public
+access** card. It lists every tool the running gateway has, grouped by
+toolset, and marks each one:
+
+- **read-only**: the MCP server says so (its `readOnlyHint`), or it's a
+  built-in lookup;
+- **can change things**: the MCP server says it isn't read-only;
+- **not marked**: nobody said. Treat it as able to change things.
+
+Ticked tools are saved to `MESHCORE_PUBLIC_TOOLS` and apply after a
+gateway restart. Whole toolsets still go in `MESHCORE_PUBLIC_TOOLSETS`.
+
+This is enforced in two places. The tool list handed to Hermes for a
+public sender leaves out MCP servers unless you name one, and a
+`pre_tool_call` hook blocks any tool outside the public list in a
+non-admin MeshCore session, whatever Hermes enabled. If that check
+itself fails, it blocks.
 
 Admin channels are treated as your people: the model may use memory and
 your profile there, but it doesn't assume the sender is you, because

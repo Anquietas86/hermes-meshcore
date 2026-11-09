@@ -188,7 +188,7 @@ class InboundTests(AdapterTestBase):
         self.assertEqual([e.text for e in self.adapter.events], ["weather?"])
         ev = self.adapter.events[0]
         self.assertEqual((ev.source.chat_id, ev.source.chat_type, ev.source.user_name), ("channel:1", "group", "Alice"))
-        self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore", "web"])
+        self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore", "web", "no_mcp"])
         self.assertIn('from "Alice" in MeshCore channel Hermes', ev.channel_prompt)
         self.assertIn("several different people", ev.channel_prompt)
 
@@ -212,9 +212,9 @@ class PolicyTests(AdapterTestBase):
     async def test_toolsets(self):
         a = self.adapter
         self.assertIsNone(a.toolsets_for_source(self.src("dm", f"dm:{ALICE6}", ALICE6)))
-        self.assertEqual(a.toolsets_for_source(self.src("dm", f"dm:{BOB6}", BOB6)), ["meshcore", "web"])
+        self.assertEqual(a.toolsets_for_source(self.src("dm", f"dm:{BOB6}", BOB6)), ["meshcore", "web", "no_mcp"])
         self.assertIsNone(a.toolsets_for_source(self.src("group", "channel:1")))
-        self.assertEqual(a.toolsets_for_source(self.src("group", "channel:0")), ["meshcore", "web"])
+        self.assertEqual(a.toolsets_for_source(self.src("group", "channel:0")), ["meshcore", "web", "no_mcp"])
         self.assertFalse(a.is_admin_node("a1"))
         a.settings.admin_toolsets = ["terminal"]
         self.assertEqual(a.toolsets_for_source(self.src("dm", "x", ALICE6)), ["terminal", "meshcore", "meshcore_admin"])
