@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Messages are no longer refused by Hermes with "Hermes refused this
+  message (invalid_params)". Current Hermes rejects inbound events that
+  carry platform metadata it doesn't know, and the adapter attached radio
+  details there. They were already in the per-message prompt, so the
+  metadata is gone.
 - The dashboard's contact list and contact picker reload when the gateway
   reconnects, instead of staying on "Gateway not connected" after a
   restart.
