@@ -154,6 +154,8 @@ class InboundTests(AdapterTestBase):
         self.assertEqual(ev.source.chat_id, f"dm:{BOB6}")
         self.assertEqual(ev.source.user_name, "Bob")
         self.assertFalse(ev.allow_gateway_control)
+        self.assertIsNone(ev.reply_expected)  # DMs always expect an answer
+        self.assertNotIn("NO_REPLY", ev.channel_prompt)
         self.assertIn('from "Bob"', ev.channel_prompt)
         self.assertIn("NOT your operator", ev.channel_prompt)
         self.assertFalse(getattr(ev, "metadata", None))  # Hermes refuses unknown metadata
@@ -191,6 +193,20 @@ class InboundTests(AdapterTestBase):
         self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore", "web", "no_mcp"])
         self.assertIn('from "Alice" in MeshCore channel Hermes', ev.channel_prompt)
         self.assertIn("several different people", ev.channel_prompt)
+        # the bot was addressed by name, so a reply is expected
+        self.assertTrue(ev.reply_expected)
+        self.assertNotIn("NO_REPLY", ev.channel_prompt)
+
+    async def test_unaddressed_channel_message_may_be_left_unanswered(self):
+        self.adapter.settings.require_mention = set()  # channel 1 no longer needs a mention
+        await self.connect()
+        await self.node.deliver(p.RESP_CHANNEL_MSG_V3,
+                                fn.channel_msg_body(1, "Alice: anyone up for a net tonight?", ts=7))
+        await self.wait_for(lambda: self.adapter.events)
+        ev = self.adapter.events[0]
+        self.assertFalse(ev.reply_expected)
+        self.assertIn("not required to answer every message", ev.channel_prompt)
+        self.assertIn("NO_REPLY", ev.channel_prompt)
 
     async def test_dms_disabled(self):
         self.adapter.settings.enable_dms = False

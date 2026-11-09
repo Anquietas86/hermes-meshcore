@@ -1,7 +1,7 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 2.1.2
+version: 2.2.0
 description: >
   MeshCore LoRa mesh platform for Hermes Agent. Talks to a MeshCore
   companion radio over TCP and relays channel messages and DMs to the

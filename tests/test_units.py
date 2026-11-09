@@ -167,6 +167,12 @@ class SenderPromptTests(unittest.TestCase):
         self.assertIn("MeshCore channel Public (3 hops)", text)
         self.assertIn("several different people", text)
 
+    def test_may_stay_silent_adds_no_reply_rule(self):
+        text = self.build(chat_type="group", chat_name="Public", may_stay_silent=True)
+        self.assertIn("not required to answer every message", text)
+        self.assertIn("NO_REPLY", text)
+        self.assertNotIn("NO_REPLY", self.build(chat_type="group", chat_name="Public"))
+
     def test_operator(self):
         text = self.build(operator=True)
         self.assertIn("this is your operator", text)
