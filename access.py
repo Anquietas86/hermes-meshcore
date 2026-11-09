@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 PLATFORM = "meshcore"
 PUBLIC_TOOLSET = "meshcore_public"
 ADMIN_ONLY_TOOLS = frozenset({"meshcore_admin"})
+# Deferred tools are invisible without discovery; these only read metadata, so they are
+# always allowed for public senders and are not operator-managed (they are not in the
+# toolset registry, so the dashboard picker cannot list them).
+DISCOVERY_TOOLS = frozenset({"tool_search", "tool_describe"})
 # Built-in tools known to only read. Everything else is "not marked read-only".
 KNOWN_READ_ONLY = frozenset({"web_search", "web_extract", "x_search", "vision_analyze",
                              "meshcore_contact", "meshcore_nearby"})
@@ -165,7 +169,7 @@ def public_toolset_list(public_toolsets: Iterable[str], public_tools: Iterable[s
 
 
 def allowed_public_tools(public_toolsets: Iterable[str], public_tools: Iterable[str]) -> Set[str]:
-    allowed: Set[str] = set(public_tools)
+    allowed: Set[str] = set(public_tools) | DISCOVERY_TOOLS
     for name in public_toolsets:
         allowed |= resolve_toolset_tools(name)
     return allowed - ADMIN_ONLY_TOOLS
