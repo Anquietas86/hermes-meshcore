@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from . import registry, repeater, state
+from . import geo, registry, repeater, state
 
 CONTACT_SCHEMA = {
     "name": "meshcore_contact",
@@ -55,6 +55,24 @@ ADMIN_SCHEMA = {
 }
 
 
+NEARBY_SCHEMA = {
+    "name": "meshcore_nearby",
+    "description": (
+        "List MeshCore nodes nearest to this bot's node, from the positions in their adverts: distance (km), "
+        "compass direction, hop count. Useful for 'which repeaters are near me' or 'who can I reach'. "
+        "No radio traffic; nodes without a position are not listed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["repeater", "room", "client", "sensor", "any"],
+                     "description": "Node type to list (default repeater)"},
+            "limit": {"type": "integer", "description": "How many to return (default 10, max 50)"},
+        },
+    },
+}
+
+
 def _contact_from_state(query: str) -> Dict[str, Any]:
     snap = state.read_state()
     contacts = state.list_contacts(snap)
@@ -83,6 +101,23 @@ async def handle_contact(args: Dict[str, Any], **_kw) -> str:
     adapter = registry.current()
     result = adapter.contact_details(name) if adapter is not None else _contact_from_state(name)
     return json.dumps(result)
+
+
+async def handle_nearby(args: Dict[str, Any], **_kw) -> str:
+    kind = str(args.get("type") or "repeater")
+    try:
+        limit = int(args.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    adapter = registry.current()
+    if adapter is not None:
+        return json.dumps(adapter.nearby(kind, limit))
+    snap = state.read_state()
+    contacts = state.list_contacts(snap)
+    if not contacts:
+        return json.dumps({"success": False, "error": snap.get("error") or "No MeshCore contacts known (is the gateway running?)"})
+    node = snap.get("node") or {}
+    return json.dumps(geo.nearby(node.get("lat"), node.get("lon"), contacts, kind=kind, limit=limit))
 
 
 async def handle_admin(args: Dict[str, Any], **_kw) -> str:
@@ -115,6 +150,9 @@ def register_tools(ctx) -> None:
     ctx.register_tool(name="meshcore_contact", toolset="meshcore", schema=CONTACT_SCHEMA,
                       handler=handle_contact, is_async=True, emoji="📇",
                       description=CONTACT_SCHEMA["description"])
+    ctx.register_tool(name="meshcore_nearby", toolset="meshcore", schema=NEARBY_SCHEMA,
+                      handler=handle_nearby, is_async=True, emoji="🧭",
+                      description=NEARBY_SCHEMA["description"])
     ctx.register_tool(name="meshcore_admin", toolset="meshcore_admin", schema=ADMIN_SCHEMA,
                       handler=handle_admin, is_async=True, emoji="🛰️", check_fn=admin_available,
                       description=ADMIN_SCHEMA["description"])

@@ -15,6 +15,7 @@ class MessageEvent:
     source: Any = None
     message_id: Optional[str] = None
     channel_prompt: Optional[str] = None
+    channel_context: Optional[str] = None
     metadata: dict = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
     allow_gateway_control: bool = True

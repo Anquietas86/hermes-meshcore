@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f�]")
 _MARKDOWN = (
@@ -144,3 +144,21 @@ def normalize_pubkey(entry: str) -> str:
     if entry.startswith("dm:"):
         entry = entry[3:]
     return entry if HEX.match(entry) else ""
+
+
+def parse_rate(raw: Any, default: Optional[tuple] = (6, 600)) -> Optional[tuple]:
+    """``"6/10m"`` -> (6, 600). ``off``/``0`` disables. Units: s, m, h (default seconds)."""
+    text = str(raw if raw is not None else "").strip().lower()
+    if not text:
+        return default
+    if text in {"off", "0", "none", "false", "no"}:
+        return None
+    count, _, window = text.partition("/")
+    try:
+        n = int(count)
+        unit = window[-1:] if window[-1:] in ("s", "m", "h") else "s"
+        value = float(window[:-1] if window[-1:] in ("s", "m", "h") else (window or 600))
+    except ValueError:
+        return default
+    seconds = value * {"s": 1, "m": 60, "h": 3600}[unit]
+    return (n, seconds) if n > 0 and seconds > 0 else None

@@ -40,6 +40,23 @@ Python standard library.
 - **Contact lookup** (`meshcore_contact` tool). It looks up a node's pubkey,
   type, hops and location from the local contact cache, with no radio
   traffic.
+- **Nearby nodes** (`meshcore_nearby` tool). It lists the repeaters (or any
+  nodes) closest to your node, with distance, compass direction and hops,
+  worked out from advert positions. No radio traffic.
+- **Repeater watch.** Name the repeaters you care about in
+  `MESHCORE_WATCH_NODES`. Each hour the bot checks whether each one is still
+  advertising, and asks for its battery level with a guest login. It DMs you
+  once when one goes quiet or runs low, and again when it recovers. No model
+  calls are involved, so it costs nothing.
+- **Reliable multi-part replies.** Parts go out one message at a time, and
+  each part waits long enough for repeaters to finish relaying the one
+  before it. DM parts wait for the recipient's ACK. Without one, the part is
+  retried once over a flood route, the way the MeshCore app does it.
+- **Rate limiting.** Each non-admin sender gets 6 messages per 10 minutes by
+  default. DM senders get one short "too many messages" reply; on channels
+  the bot just stays quiet.
+- **Channel context.** When someone @mentions the bot, it also sees the last
+  few channel messages, so "what do you think?" makes sense.
 - **Cron and `hermes send` delivery** to `MESHCORE_HOME_CHANNEL`, through the
   running gateway's connection.
 - **Dashboard tab.** It shows node status and stats, a searchable contact
@@ -104,6 +121,15 @@ Then restart: `hermes gateway restart`.
 | `MESHCORE_MAX_MESSAGE_BYTES` | `130` | Bytes per packet (40–200) |
 | `MESHCORE_MAX_CHUNKS` | `6` | Packets per reply before truncating |
 | `MESHCORE_ADVERT_ON_START` | `true` | Flood advert when the gateway starts |
+| `MESHCORE_RATE_LIMIT` | `6/10m` | Messages per non-admin sender per window (`s`, `m`, `h`). `off` disables |
+| `MESHCORE_CHANNEL_CONTEXT` | `6` | Recent channel messages passed along with a mention (`0` = off) |
+| `MESHCORE_CHUNK_DELAY` | auto | Seconds between reply parts. Auto: 3 × the packet's LoRa airtime (at least 2s), or 0.5s after an acknowledged DM part |
+| `MESHCORE_WATCH_NODES` | | Repeaters to watch (names or pubkey prefixes) |
+| `MESHCORE_WATCH_NOTIFY` | home channel, else your admin node | Where watch alerts go: `channel:N` or `dm:<prefix>` |
+| `MESHCORE_WATCH_INTERVAL_MINUTES` | `60` | Minutes between checks |
+| `MESHCORE_WATCH_SILENT_HOURS` | `12` | Alert when no advert has been heard for this long |
+| `MESHCORE_WATCH_BATTERY_MV` | `3500` | Alert below this battery level (`0` = off) |
+| `MESHCORE_WATCH_STATUS` | `true` | Ask each watched repeater for its status (guest login) on every check |
 | `MESHCORE_DEBUG` | `false` | Log every frame |
 
 Mentions can be `@Bot hi`, `Bot: hi`, or the MeshCore app's `@[Bot] hi`
@@ -157,10 +183,21 @@ memory:
 - If the link drops, or the node misses two keepalives, the adapter reports a
   retryable error. Hermes's reconnect watcher then rebuilds it with backoff.
   The adapter never fights the gateway by reconnecting on its own.
-- A reply packet that times out is not resent. It may already be on air,
+- Multi-part replies are paced by airtime. At SF11 / 250 kHz, one full
+  packet is on air for about 1.4 seconds, and repeaters then relay it. Send
+  the next part sooner and it collides with the relays, so parts go missing.
+  The old 1-second gap was too short for exactly that reason.
+- A part the node itself didn't confirm is not resent. It may already be on air,
   and duplicates garble reception for everyone.
 - Messages that arrive while a repeater query is running are still delivered.
   Every frame goes through one reader.
+
+## USB serial (experimental)
+
+Set `MESHCORE_HOST=serial:/dev/ttyUSB0` to talk to a USB-connected
+companion at 115200 baud. Standard library only, on Linux and macOS. The
+framing is identical to TCP. The automated tests run it over a virtual serial
+port, but it has not been tried on real hardware yet. Reports are welcome.
 
 ## Multi-profile installs
 

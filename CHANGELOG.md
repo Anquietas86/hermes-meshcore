@@ -43,6 +43,20 @@ A ground-up rebuild against the current Hermes platform plugin contract.
   on a public channel as the operator, using the operator's name, or
   repeating their memory and profile. The README covers the stronger fix: a
   separate profile with memory turned off.
+- Multi-part replies no longer lose parts:
+  - Parts are paced by LoRa airtime instead of a fixed 1 second, so the next
+    part isn't sent while repeaters are still relaying the last one.
+  - Replies are sent one at a time, never interleaved.
+  - DM parts wait for the recipient's ACK and are retried once over a flood
+    route if none arrives.
+- A per-sender rate limit (`MESHCORE_RATE_LIMIT`, default 6 per 10 minutes).
+  Admins are exempt.
+- Recent channel messages go along with a mention as context
+  (`MESHCORE_CHANNEL_CONTEXT`).
+- `meshcore_nearby` tool: the nearest repeaters or nodes, by advert position.
+- Repeater watch (`MESHCORE_WATCH_*`): DMs you when a watched repeater stops
+  advertising or reports a low battery, and when it recovers.
+- Experimental USB serial support (`MESHCORE_HOST=serial:/dev/ttyUSB0`).
 - `@[Name]` mentions, as sent by the MeshCore app.
 - New remote commands: `telemetry`, `acl` and `regions`, with parsed output.
 - A new test suite with a fake companion node over TCP, and CI that runs it.

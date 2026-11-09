@@ -16,10 +16,11 @@ def self_info_body(name: str = "HermesBot", pubkey: bytes = bytes.fromhex("aa" *
     return body + name.encode()
 
 
-def contact_body(pubkey_hex: str, name: str, ctype: int = 1, hops: int = 2, path: bytes = b"\x11\x22") -> bytes:
+def contact_body(pubkey_hex: str, name: str, ctype: int = 1, hops: int = 2, path: bytes = b"\x11\x22",
+                 lat: float = 0.0, lon: float = 0.0, advert: int = 1700000000) -> bytes:
     plen = 0xFF if hops < 0 else hops
     body = bytes.fromhex(pubkey_hex) + bytes([ctype, 0, plen]) + path.ljust(64, b"\0")
-    body += name.encode().ljust(32, b"\0") + struct.pack("<IiiI", 1700000000, 0, 0, 1700000000)
+    body += name.encode().ljust(32, b"\0") + struct.pack("<IiiI", advert, int(lat * 1e6), int(lon * 1e6), 1700000000)
     return body
 
 
@@ -55,11 +56,14 @@ class FakeNode:
         self.repeater_replies = True
         self.on_binary_req = None  # hook(sub_type) -> optional side effect
         self.connections = 0
+        self.dm_acks = True       # recipients acknowledge DMs
+        self.ack_attempts = set()  # if set, only these attempt numbers get an ACK
+        self.ack_delay = 0.05
         self.contacts = [
             contact_body(self.ALICE, "Alice", 1, 1),
             contact_body(self.BOB, "Bob", 1, 3),
-            contact_body(self.RPT, "Hilltop RPT", 2, 2, b"\x11\x22"),
-            contact_body(self.FLOOD_RPT, "Valley RPT", 2, -1),
+            contact_body(self.RPT, "Hilltop RPT", 2, 2, b"\x11\x22", lat=-34.90, lon=138.70),
+            contact_body(self.FLOOD_RPT, "Valley RPT", 2, -1, lat=-35.10, lon=138.55),
         ]
 
     async def start(self) -> "FakeNode":
@@ -152,7 +156,13 @@ class FakeNode:
                     2: struct.pack("<6I", 1, 2, 3, 4, 5, 6)}[kind]
             out.append(b"\x18" + bytes([kind]) + data)
         elif code == 0x02:
-            out.append(b"\x06\x00" + os.urandom(4) + struct.pack("<I", 3000))
+            tag = os.urandom(4)
+            out.append(b"\x06\x00" + tag + struct.pack("<I", 3000))
+            attempt = body[1]
+            if self.dm_acks and (not self.ack_attempts or attempt in self.ack_attempts):
+                later.append(b"\x82" + tag + struct.pack("<I", 1200))
+        elif code == 0x0D:
+            out.append(b"\x00")
         elif code == 0x03:
             out.append(b"\x00")
         elif code == 0x1A:
@@ -183,7 +193,7 @@ class FakeNode:
             w.write(frame(item))
         await w.drain()
         if later:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(self.ack_delay)
             for item in later:
                 w.write(frame(item))
             await w.drain()

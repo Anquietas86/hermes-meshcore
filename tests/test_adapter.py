@@ -25,12 +25,14 @@ class AdapterTestBase(unittest.IsolatedAsyncioTestCase):
         self.node = await fn.FakeNode().start()
         env = {k: v for k, v in os.environ.items() if not k.startswith("MESHCORE_")}
         env.update(HERMES_HOME=self.tmp.name, MESHCORE_HOST="127.0.0.1", MESHCORE_PORT=str(self.node.port),
-                   MESHCORE_MONITOR_CHANNELS="1", MESHCORE_ADVERT_ON_START="false")
+                   MESHCORE_MONITOR_CHANNELS="1", MESHCORE_ADVERT_ON_START="false",
+                   MESHCORE_CHUNK_DELAY="0", MESHCORE_RATE_LIMIT="off")
         env.update(self.env)
         self._env = mock.patch.dict(os.environ, env, clear=True)
         self._env.start()
         self._patches = [mock.patch.object(A, name, value) for name, value in (
-            ("CHUNK_DELAY", 0.0), ("IPC_INTERVAL", 0.05), ("STATE_INTERVAL", 0.2))]
+            ("ACK_WAIT_MIN", 0.3), ("ACK_WAIT_MAX", 0.3), ("IPC_INTERVAL", 0.05), ("STATE_INTERVAL", 0.2),
+            ("WATCH_START_DELAY", 3600.0))]  # tests drive _watch_once directly
         for patch in self._patches:
             patch.start()
         gw_status.LOCKS.clear()
@@ -370,7 +372,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(ctx.platform["max_message_length"], 0)
         self.assertIs(ctx.platform["standalone_sender_fn"], A._standalone_send)
         self.assertNotIn("dashboard_description", ctx.platform)  # not a field in the stub registry
-        self.assertEqual([t["name"] for t in ctx.tools], ["meshcore_contact", "meshcore_admin"])
+        self.assertEqual([t["name"] for t in ctx.tools], ["meshcore_contact", "meshcore_nearby", "meshcore_admin"])
 
     def test_env_enablement(self):
         env = {"MESHCORE_HOST": "n", "MESHCORE_PORT": "4000", "MESHCORE_HOME_CHANNEL": "2"}

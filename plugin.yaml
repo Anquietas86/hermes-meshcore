@@ -9,10 +9,11 @@ description: >
 author: Josh Hagger
 provides_tools:
   - meshcore_contact
+  - meshcore_nearby
   - meshcore_admin
 requires_env:
   - name: MESHCORE_HOST
-    description: "Companion node hostname or IP (TCP)"
+    description: "Companion node hostname or IP (TCP), or serial:/dev/ttyUSB0 for USB (experimental)"
     prompt: "MeshCore host"
     password: false
 optional_env:
@@ -83,4 +84,40 @@ optional_env:
   - name: MESHCORE_DEBUG
     description: "Log every frame for troubleshooting (default false)"
     prompt: "Debug logging?"
+    password: false
+  - name: MESHCORE_RATE_LIMIT
+    description: "Messages each non-admin sender may send per window, e.g. 6/10m (default). off disables"
+    prompt: "Rate limit"
+    password: false
+  - name: MESHCORE_CHANNEL_CONTEXT
+    description: "Recent channel messages passed along when the bot is mentioned (default 6, 0 = off)"
+    prompt: "Channel context messages"
+    password: false
+  - name: MESHCORE_CHUNK_DELAY
+    description: "Seconds between reply packets; default auto (from LoRa airtime, DM parts wait for ACKs)"
+    prompt: "Delay between packets"
+    password: false
+  - name: MESHCORE_WATCH_NODES
+    description: "Repeaters to watch (names or pubkey prefixes); alerts when one goes quiet or its battery runs low"
+    prompt: "Repeaters to watch"
+    password: false
+  - name: MESHCORE_WATCH_NOTIFY
+    description: "Where watch alerts go: channel:N or dm:<prefix> (default home channel, else your admin node)"
+    prompt: "Watch alerts to"
+    password: false
+  - name: MESHCORE_WATCH_INTERVAL_MINUTES
+    description: "Minutes between watch checks (default 60)"
+    prompt: "Watch interval"
+    password: false
+  - name: MESHCORE_WATCH_SILENT_HOURS
+    description: "Alert when no advert has been heard for this many hours (default 12)"
+    prompt: "Silent after hours"
+    password: false
+  - name: MESHCORE_WATCH_BATTERY_MV
+    description: "Alert below this battery voltage in mV (default 3500, 0 = off)"
+    prompt: "Low battery mV"
+    password: false
+  - name: MESHCORE_WATCH_STATUS
+    description: "Query each watched repeater's status (guest login) on every check (default true)"
+    prompt: "Query status?"
     password: false

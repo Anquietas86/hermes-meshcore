@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
+import os
 import socket
 import struct
 from dataclasses import dataclass
@@ -49,6 +51,7 @@ CMD_SEND_LOGIN = 0x1A
 CMD_GET_CHANNEL = 0x1F
 CMD_BINARY_REQ = 0x32
 CMD_GET_STATS = 0x38
+CMD_RESET_PATH = 0x0D
 CMD_SEND_ANON_REQ = 0x39
 
 # Sub-types for CMD_BINARY_REQ (require a login, guest is fine)
@@ -435,6 +438,41 @@ PushHandler = Callable[[Frame], Awaitable[None]]
 ClosedHandler = Callable[[Optional[BaseException]], Awaitable[None]]
 
 
+def cmd_reset_path(pubkey: bytes) -> bytes:
+    if len(pubkey) != 32:
+        raise ValueError("reset path needs the full 32-byte pubkey")
+    return bytes([CMD_RESET_PATH]) + pubkey
+
+
+def parse_ack(body: bytes) -> Dict[str, Any]:
+    """ACK push: code(4) [+ round-trip ms(4) on firmware since early 2025]."""
+    _require(body, 4, "ACK")
+    out: Dict[str, Any] = {"code": body[:4].hex()}
+    if len(body) >= 8:
+        out["trip_ms"] = int.from_bytes(body[4:8], "little")
+    return out
+
+
+# MeshCore packet overhead on top of the text: header, path, MAC, timestamp, flags.
+PACKET_OVERHEAD_BYTES = 24
+
+
+def lora_airtime_s(payload_bytes: int, sf: int, bw_khz: float, cr: int, preamble: int = 16) -> float:
+    """Time on air for one LoRa packet (Semtech AN1200.13), explicit header, CRC on.
+
+    ``cr`` is the denominator of the coding rate (5..8 for 4/5..4/8).
+    Falls back to conservative SF11/250kHz numbers when the radio settings are unknown.
+    """
+    if not (6 <= int(sf or 0) <= 12) or not bw_khz or bw_khz <= 0:
+        sf, bw_khz = 11, 250.0
+    cr_idx = min(4, max(1, (int(cr or 5) - 4) if int(cr or 5) >= 5 else int(cr or 1)))
+    t_sym = (2 ** sf) / (bw_khz * 1000.0)
+    low_dr = 1 if t_sym > 0.016 else 0
+    n = 8 * payload_bytes - 4 * sf + 28 + 16
+    payload_symbols = 8 + max(math.ceil(n / (4 * (sf - 2 * low_dr))) * (cr_idx + 4), 0)
+    return (preamble + 4.25 + payload_symbols) * t_sym
+
+
 class MeshCoreClient:
     """One TCP session with a companion node.
 
@@ -458,12 +496,17 @@ class MeshCoreClient:
         self._tasks: List[asyncio.Task] = []
         self._closing = False
         self._closed_event = asyncio.Event()
+        self._read_transport = None  # serial only: the read side is a separate pipe transport
 
     @property
     def connected(self) -> bool:
         return self._writer is not None and not self._closed_event.is_set()
 
     async def open(self, timeout: float = 15.0) -> None:
+        if self.host.startswith("serial:"):
+            self._reader, self._writer, self._read_transport = await open_serial(self.host[7:])
+            self._start_tasks()
+            return
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), timeout=timeout)
         sock = self._writer.get_extra_info("socket")
@@ -473,6 +516,9 @@ class MeshCoreClient:
                 for opt, value in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
                     if hasattr(socket, opt):
                         sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), value)
+        self._start_tasks()
+
+    def _start_tasks(self) -> None:
         self._tasks = [
             asyncio.create_task(self._read_loop(), name="meshcore-reader"),
             asyncio.create_task(self._push_loop(), name="meshcore-push"),
@@ -494,6 +540,9 @@ class MeshCoreClient:
             self._writer.close()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._writer.wait_closed(), timeout=2.0)
+        if self._read_transport is not None:
+            self._read_transport.close()
+            self._read_transport = None
         self._reader = self._writer = None
 
     async def _read_loop(self) -> None:
@@ -611,3 +660,39 @@ class MeshCoreClient:
 
     async def wait_closed(self) -> None:
         await self._closed_event.wait()
+
+
+# ── USB serial (experimental) ────────────────────────────────────────────
+
+SERIAL_BAUD = 115200
+
+
+async def open_serial(path: str, baud: int = SERIAL_BAUD):
+    """Open a USB-serial companion as an asyncio stream pair (POSIX, stdlib only).
+
+    Selected with ``MESHCORE_HOST=serial:/dev/ttyUSB0``. The companion uses the
+    same framing over serial as over TCP. Experimental: not tested on hardware.
+    """
+    import termios
+    import tty
+
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        tty.setraw(fd)
+        attrs = termios.tcgetattr(fd)
+        speed = getattr(termios, f"B{baud}")
+        attrs[4] = attrs[5] = speed
+        attrs[2] |= termios.CLOCAL | termios.CREAD
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        read_file = os.fdopen(fd, "rb", buffering=0)
+        write_file = os.fdopen(os.dup(fd), "wb", buffering=0)
+    except Exception:
+        os.close(fd)
+        raise
+    read_transport, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), read_file)
+    transport, protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, write_file)
+    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+    return reader, writer, read_transport
