@@ -73,11 +73,13 @@ def _mcp_read_only(tool_name: str) -> Optional[bool]:
 
 
 def resolve_toolset_tools(name: str) -> Set[str]:
+    # Our own toolset's tools are always known, even before (or without) Hermes's registry listing them.
+    own = set(FALLBACK_TOOLSET_TOOLS["meshcore"]) if name == "meshcore" else set()
     try:
         from toolsets import resolve_toolset
-        return set(resolve_toolset(name))
+        return set(resolve_toolset(name)) | own
     except Exception:
-        return set(FALLBACK_TOOLSET_TOOLS.get(name, ()))
+        return set(FALLBACK_TOOLSET_TOOLS.get(name, ())) | own
 
 
 def catalog(limit_description: int = 160) -> List[Dict[str, Any]]:

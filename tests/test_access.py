@@ -28,6 +28,14 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("meshcore_admin", access.public_toolset_list(["meshcore_admin", "web"], [], set()))
         self.assertNotIn("meshcore_admin", access.allowed_public_tools(["meshcore"], ["meshcore_admin"]))
 
+    def test_own_tools_allowed_even_if_hermes_does_not_list_them(self):
+        import toolsets
+        saved = toolsets.TOOLSETS.pop("meshcore")
+        try:
+            self.assertTrue({"meshcore_contact", "meshcore_nearby"} <= access.allowed_public_tools(["meshcore"], []))
+        finally:
+            toolsets.TOOLSETS["meshcore"] = saved
+
     def test_chosen_tools_become_a_toolset(self):
         names = access.public_toolset_list(["meshcore"], ["mcp_openhop_status"], servers=set())
         self.assertIn(access.PUBLIC_TOOLSET, names)
