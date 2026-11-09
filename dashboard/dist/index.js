@@ -273,7 +273,7 @@
     { key: "admin_channels", label: "Trusted admin channels", hint: "e.g. 3" },
     { key: "admin_nodes", label: "Admin node pubkeys (12+ hex chars)", hint: "a1b2c3d4e5f6" },
     { key: "allowed_users", label: "Allowed DM senders (12+ hex chars)", hint: "a1b2c3d4e5f6,…" },
-    { key: "public_toolsets", label: "Tools for everyone else (read-only lookups)", hint: "meshcore,web (default)" }
+    { key: "public_toolsets", label: "Whole toolsets for everyone else", hint: "meshcore,web (default). Pick single tools under Public access" }
   ];
   var TOGGLES = [{ key: "enable_dms", label: "Answer DMs" }, { key: "allow_all_users", label: "Allow everyone (dev only)" }];
 
@@ -360,6 +360,75 @@
     );
   }
 
+  // ── Public access ─────────────────────────────────────────────────────
+  function splitList(v) { return String(v || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+  function PublicAccessCard(props) {
+    var _a = useState(null), d = _a[0], setD = _a[1];
+    var _b = useState(null), chosen = _b[0], setChosen = _b[1];
+    var _c = useState(null), msg = _c[0], setMsg = _c[1];
+    var _d = useState(""), q = _d[0], setQ = _d[1];
+    var _e = useState(false), busy = _e[0], setBusy = _e[1];
+    function load() {
+      api("/tools").then(function (r) { setD(r); setChosen(splitList(r.public_tools)); })
+        .catch(function (e) { setMsg(errText(e)); });
+    }
+    useEffect(load, [props.connected]);
+    if (!d || !chosen) return h(Card, { title: "🔓 Public access" }, msg || "Loading…");
+    var toolsets = splitList(d.public_toolsets);
+    if (!toolsets.length) toolsets = ["meshcore", "web"];
+    var saved = splitList(d.public_tools);
+    var dirty = chosen.slice().sort().join(",") !== saved.slice().sort().join(",");
+    function covered(t) { return toolsets.indexOf(t.toolset) >= 0 || (d.allowed.indexOf(t.name) >= 0 && saved.indexOf(t.name) < 0); }
+    function toggle(name, on) {
+      setChosen(on ? chosen.concat([name]) : chosen.filter(function (n) { return n !== name; }));
+    }
+    function save() {
+      setBusy(true);
+      post("/config", { public_tools: chosen.join(",") }).then(function () { setMsg("Saved. Restart the gateway to apply."); load(); })
+        .catch(function (e) { setMsg("Not saved: " + errText(e)); }).then(function () { setBusy(false); });
+    }
+    var needle = q.trim().toLowerCase();
+    var rows = d.catalog.filter(function (t) {
+      return !needle || (t.name + " " + t.toolset + " " + (t.description || "")).toLowerCase().indexOf(needle) >= 0;
+    });
+    var groups = {};
+    rows.forEach(function (t) { (groups[t.toolset || "other"] = groups[t.toolset || "other"] || []).push(t); });
+    var risky = chosen.filter(function (n) { var t = d.catalog.find(function (c) { return c.name === n; }); return !t || t.read_only !== true; });
+    function badge(t) {
+      if (t.read_only === true) return h("span", { className: "mc-badge", style: { background: "#16a34a22", color: "#16a34a" } }, "read-only");
+      if (t.read_only === false) return h("span", { className: "mc-badge", style: { background: "#dc262622", color: "#dc2626" } }, "can change things");
+      return h("span", { className: "mc-badge", style: { background: "#88888822", color: "#888" } }, "not marked");
+    }
+    return h(Card, { title: "🔓 Public access" },
+      h("div", { className: "mc-msg", style: { marginTop: 0 } },
+        "Tools anyone who isn't an admin may use, in DMs and public channels. Admins always get everything. " +
+        "Whole toolsets open now: " + toolsets.join(", ") + " (set in Settings)."),
+      !d.catalog.length && h("div", { className: "mc-msg" },
+        d.connected ? "The gateway hasn't published its tool list yet. Give it a minute after a restart." :
+          "The gateway isn't running, so there's no tool list to pick from."),
+      d.catalog.length > 0 && h("input", { className: "mc-input", style: { margin: ".5rem 0" }, placeholder: "Filter tools…",
+        value: q, onChange: function (e) { setQ(e.target.value); } }),
+      h("div", { style: { maxHeight: "360px", overflow: "auto" } },
+        Object.keys(groups).sort().map(function (g) {
+          return h("div", { key: g, style: { marginBottom: ".5rem" } },
+            h("div", { style: { fontWeight: 600, fontSize: ".8rem", margin: ".25rem 0" } }, g),
+            groups[g].map(function (t) {
+              var isCovered = covered(t);
+              return h("label", { key: t.name, title: t.description || "", style: { display: "flex", gap: ".5rem", alignItems: "baseline", fontSize: ".8rem", padding: ".1rem 0" } },
+                h("input", { type: "checkbox", disabled: isCovered, checked: isCovered || chosen.indexOf(t.name) >= 0,
+                  onChange: function (e) { toggle(t.name, e.target.checked); } }),
+                h("span", { className: "mc-mono" }, t.name), badge(t),
+                isCovered && h("span", { style: { color: "var(--color-muted-foreground,#888)" } }, "via " + t.toolset));
+            }));
+        })),
+      risky.length > 0 && h("div", { className: "mc-msg", style: { color: "var(--color-destructive,#dc2626)" } },
+        "⚠️ Not marked read-only, so strangers could use these to change things: " + risky.join(", ")),
+      h("div", { className: "mc-actions" },
+        h("button", { className: "mc-btn", onClick: save, disabled: busy || !dirty }, "💾 Save"),
+        h("button", { className: "mc-btn", onClick: load, disabled: busy }, "↩ Revert")),
+      msg && h("div", { className: "mc-msg" }, msg));
+  }
+
   // ── Page ──────────────────────────────────────────────────────────────
   function MeshCorePage() {
     var _a = useState(null), data = _a[0], setData = _a[1];
@@ -382,7 +451,8 @@
         h(AdminCard, { adminEnabled: adminEnabled }),
         h(ChannelsCard, { data: data }),
         h(ContactsCard, { connected: !!data.connected }),
-        h(SettingsCard, { connected: !!data.connected })));
+        h(SettingsCard, { connected: !!data.connected }),
+        h(PublicAccessCard, { connected: !!data.connected })));
   }
 
   window.__HERMES_PLUGINS__.register(PLUGIN_NAME, MeshCorePage);

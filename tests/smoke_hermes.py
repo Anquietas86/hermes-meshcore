@@ -41,6 +41,12 @@ class Ctx:
 
     def __init__(self):
         self.tools = []
+        self.hooks = {}
+
+    def register_hook(self, hook_name, callback, *, hold_stream=False):
+        from hermes_cli.plugins import VALID_HOOKS
+        assert hook_name in VALID_HOOKS, hook_name
+        self.hooks[hook_name] = callback
 
     def register_platform(self, name, label, adapter_factory, check_fn, validate_config=None,
                           required_env=None, install_hint="", **entry_kwargs):
@@ -57,11 +63,52 @@ class Ctx:
         self.tools.append((name, toolset))
 
 
+async def check_public_access(adapter, ctx, source) -> None:
+    """Strangers must not get MCP servers, and the hook must veto anything off the allowlist."""
+    from hermes_cli.tools_config import _get_platform_tools
+    from gateway.session_context import clear_session_vars, set_session_vars
+    access = sys.modules["meshcore_platform.access"]
+    config = {"mcp_servers": {"homeassistant": {"command": "true"}},
+              "platform_toolsets": {"meshcore": adapter.toolsets_for_source(source)}}
+    enabled = _get_platform_tools(config, "meshcore")
+    assert "homeassistant" not in enabled and "mcp-homeassistant" not in enabled, enabled
+    assert "web" in enabled and "meshcore" in enabled, enabled
+
+    adapter.settings.public_tools = ["web_search"]
+    adapter._allowlist = None
+    names = adapter.toolsets_for_source(source)
+    assert access.PUBLIC_TOOLSET in names and "no_mcp" in names, names
+    from toolsets import resolve_toolset
+    assert resolve_toolset(access.PUBLIC_TOOLSET) == ["web_search"], resolve_toolset(access.PUBLIC_TOOLSET)
+    enabled = _get_platform_tools({"platform_toolsets": {"meshcore": names}}, "meshcore")
+    assert access.PUBLIC_TOOLSET in enabled, enabled
+    adapter.settings.public_tools = []
+    adapter._allowlist = None
+
+    hook = ctx.hooks["pre_tool_call"]
+    tokens = set_session_vars(platform="meshcore", chat_id=source.chat_id, chat_type=str(source.chat_type),
+                              user_id=source.user_id)
+    try:
+        assert hook(tool_name="web_search", args={}) is None
+        assert hook(tool_name="meshcore_contact", args={}) is None
+        for tool in ("terminal", "meshcore_admin", "mcp_homeassistant_HassTurnOn"):
+            verdict = hook(tool_name=tool, args={})
+            assert verdict and verdict["action"] == "block" and verdict["message"], (tool, verdict)
+    finally:
+        clear_session_vars(tokens)
+    tokens = set_session_vars(platform="telegram", chat_id="1", chat_type="dm", user_id="1")
+    try:
+        assert hook(tool_name="terminal", args={}) is None
+    finally:
+        clear_session_vars(tokens)
+
+
 async def main() -> None:
     plugin = load_plugin()
     ctx = Ctx()
     plugin.register(ctx)
     assert [t[0] for t in ctx.tools] == ["meshcore_contact", "meshcore_nearby", "meshcore_admin"], ctx.tools
+    assert "pre_tool_call" in ctx.hooks, ctx.hooks
 
     from gateway.config import Platform, PlatformConfig
     from gateway.platform_registry import platform_registry
@@ -96,9 +143,11 @@ async def main() -> None:
         event = events[0]
         assert event.text == "hello: mesh", event.text
         assert event.source.chat_id == "dm:" + fn.FakeNode.BOB[:12]
-        assert adapter.toolsets_for_source(event.source) == ["meshcore", "web"]
+        public = adapter.toolsets_for_source(event.source)
+        assert public == ["meshcore", "web", "no_mcp"], public
         from toolsets import TOOLSETS
         assert "web" in TOOLSETS, "Hermes no longer has a 'web' toolset"
+        await check_public_access(adapter, ctx, event.source)
         # The gateway's admission check refuses events it can't persist ("Hermes refused this
         # message (invalid_params)"). Run the same per-event checks it runs.
         try:

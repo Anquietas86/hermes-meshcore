@@ -117,6 +117,21 @@ class DashboardTests(unittest.TestCase):
         for body in ({"home_channel": "dm:xyz"}, {"home_channel": "3d22d2f1b71e"}, {"watch_notify": "channel:a"}):
             self.assertEqual(self.client.post(self.url("/config"), json=body).status_code, 400, body)
 
+    def test_public_tools(self):
+        catalog = [{"name": "mcp_openhop_status", "toolset": "mcp-openhop", "read_only": True}]
+        self.api.state.write_state({"connected": True, "public_access": {
+            "toolsets": ["meshcore"], "tools": [], "allowed": ["meshcore_contact"], "catalog": catalog}})
+        self.assertNotIn("catalog", self.client.get(self.url("/status")).json()["public_access"])
+        r = self.client.post(self.url("/config"), json={"public_tools": "mcp_openhop_status,mcp_ha_GetLiveContext"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("MESHCORE_PUBLIC_TOOLS=mcp_openhop_status,mcp_ha_GetLiveContext\n", self.env_file.read_text())
+        tools = self.client.get(self.url("/tools")).json()
+        self.assertEqual(tools["catalog"], catalog)
+        self.assertEqual(tools["public_tools"], "mcp_openhop_status,mcp_ha_GetLiveContext")
+        self.assertEqual(tools["allowed"], ["meshcore_contact"])
+        for body in ({"public_tools": "a/b"}, {"public_tools": "x\nOPENAI_API_KEY=1"}, {"public_tools": "a;b"}):
+            self.assertEqual(self.client.post(self.url("/config"), json=body).status_code, 400, body)
+
     def test_connection_test(self):
         import asyncio
         import threading

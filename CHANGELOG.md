@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.1.0
+
+### Security
+
+- Public senders no longer get every MCP server and plugin toolset. Hermes
+  adds all enabled MCP servers and plugin toolsets to a platform's tool
+  list unless told otherwise, so a stranger on the mesh could reach, for
+  example, a Home Assistant MCP server. The public list now carries
+  Hermes's `no_mcp` marker, and a `pre_tool_call` hook blocks any tool
+  outside the public allowlist in non-admin MeshCore sessions. The hook
+  fails closed. Admins are unaffected.
+
+### Added
+
+- **Public access** card on the dashboard: every tool the running gateway
+  has, grouped by toolset and marked read-only, can change things, or not
+  marked. Tick the ones strangers may use.
+- `MESHCORE_PUBLIC_TOOLS`: single extra tools for non-admin senders, which
+  the card writes.
+- `GET /api/plugins/meshcore-platform/tools` for the card.
+
 ## 2.0.3
 
 ### Changed

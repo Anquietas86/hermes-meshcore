@@ -65,7 +65,7 @@ except ImportError:
             return False
 
 from . import protocol as p
-from . import geo, registry, repeater, state
+from . import access, geo, registry, repeater, state
 from .textutil import (as_bool, as_list, normalize_pubkey, parse_int_set, parse_rate, plain_text,
                        split_for_mesh, split_sender, strip_mention)
 
@@ -77,7 +77,7 @@ except TypeError:
     _EVENT_HAS_CONTEXT = False
 
 PLATFORM_NAME = "meshcore"
-VERSION = "2.0.3"
+VERSION = "2.1.0"
 
 KEEPALIVE_INTERVAL = 30.0
 KEEPALIVE_TIMEOUT = 8.0
@@ -171,6 +171,7 @@ class Settings:
     max_chunks: int = 6
     advert_on_start: bool = True
     public_toolsets: List[str] = dataclasses.field(default_factory=lambda: list(DEFAULT_PUBLIC_TOOLSETS))
+    public_tools: List[str] = dataclasses.field(default_factory=list)
     admin_toolsets: Optional[List[str]] = None
     debug: bool = False
     rate_limit: Optional[tuple] = (6, 600.0)    # (messages, seconds) per sender; None = off
@@ -234,6 +235,8 @@ class Settings:
         s.advert_on_start = as_bool(get("advert_on_start", "MESHCORE_ADVERT_ON_START", None), True)
         public = as_list(get("public_toolsets", "MESHCORE_PUBLIC_TOOLSETS"))
         s.public_toolsets = public or list(DEFAULT_PUBLIC_TOOLSETS)
+        s.public_tools = [t for t in as_list(get("public_tools", "MESHCORE_PUBLIC_TOOLS"))
+                          if t not in access.ADMIN_ONLY_TOOLS]
         admin = as_list(get("admin_toolsets", "MESHCORE_ADMIN_TOOLSETS"))
         s.admin_toolsets = admin or None
         s.debug = as_bool(get("debug", "MESHCORE_DEBUG", None), False)
@@ -318,6 +321,8 @@ class MeshCoreAdapter(BasePlatformAdapter):
         self._closing = False
         self._failed = False
         self._last_error: Optional[Dict[str, Any]] = None
+        self._allowlist: Optional[tuple] = None
+        self._catalog: tuple = (0.0, [])
         self._connected_at: Optional[float] = None
         self._last_rx_message: Optional[float] = None
         self._counters = {"dm_in": 0, "channel_in": 0, "sent": 0, "send_errors": 0,
@@ -374,7 +379,15 @@ class MeshCoreAdapter(BasePlatformAdapter):
                 return None
         except Exception:
             logger.warning("MeshCore: toolsets_for_source failed; restricting", exc_info=True)
-        return [t for t in self.settings.public_toolsets if t != "meshcore_admin"] or ["meshcore"]
+        return access.public_toolset_list(self.settings.public_toolsets, self.settings.public_tools)
+
+    def public_tool_allowlist(self) -> Set[str]:
+        """Tool names a non-admin sender may call (enforced by the pre_tool_call hook)."""
+        now = time.monotonic()
+        if self._allowlist is None or now - self._allowlist[0] > 60:
+            self._allowlist = (now, access.allowed_public_tools(self.settings.public_toolsets,
+                                                                self.settings.public_tools))
+        return self._allowlist[1]
 
     def resolved_allowlist_user_ids(self) -> Set[str]:
         """Map allowlist entries (any case, full keys or prefixes) to the 12-hex ids DMs carry."""
@@ -1222,7 +1235,18 @@ class MeshCoreAdapter(BasePlatformAdapter):
             },
             "commands": {name: cmd.description for name, cmd in repeater.COMMANDS.items()},
             "watch": [{k: v for k, v in e.items() if k != "last_advert"} for e in self._watch.values()],
+            "public_access": {
+                "toolsets": list(s.public_toolsets), "tools": list(s.public_tools),
+                "allowed": sorted(self.public_tool_allowlist()),
+                "catalog": self._tool_catalog(),
+            },
         }
+
+    def _tool_catalog(self) -> List[Dict[str, Any]]:
+        now = time.monotonic()
+        if not self._catalog[1] or now - self._catalog[0] > 60:
+            self._catalog = (now, access.catalog())
+        return self._catalog[1]
 
     def _write_state(self) -> None:
         state.write_state(self.snapshot(), self._home)
