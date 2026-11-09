@@ -133,7 +133,8 @@ class InboundTests(AdapterTestBase):
         self.assertEqual(ev.source.chat_id, f"dm:{BOB6}")
         self.assertEqual(ev.source.user_name, "Bob")
         self.assertFalse(ev.allow_gateway_control)
-        self.assertIn("member of the public", ev.channel_prompt)
+        self.assertIn('from "Bob"', ev.channel_prompt)
+        self.assertIn("NOT your operator", ev.channel_prompt)
 
     async def test_admin_dm(self):
         await self.connect()
@@ -141,7 +142,8 @@ class InboundTests(AdapterTestBase):
         await self.wait_for(lambda: self.adapter.events)
         ev = self.adapter.events[0]
         self.assertTrue(ev.allow_gateway_control)
-        self.assertIn("Trusted admin", ev.channel_prompt)
+        self.assertIn("this is your operator", ev.channel_prompt)
+        self.assertNotIn("NOT your operator", ev.channel_prompt)
         self.assertIsNone(self.adapter.toolsets_for_source(ev.source))
 
     async def test_cli_data_and_duplicates_ignored(self):
@@ -165,6 +167,8 @@ class InboundTests(AdapterTestBase):
         ev = self.adapter.events[0]
         self.assertEqual((ev.source.chat_id, ev.source.chat_type, ev.source.user_name), ("channel:1", "group", "Alice"))
         self.assertEqual(self.adapter.toolsets_for_source(ev.source), ["meshcore"])
+        self.assertIn('from "Alice" in MeshCore channel Hermes', ev.channel_prompt)
+        self.assertIn("several different people", ev.channel_prompt)
 
     async def test_dms_disabled(self):
         self.adapter.settings.enable_dms = False

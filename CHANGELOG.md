@@ -38,6 +38,11 @@ A ground-up rebuild against the current Hermes platform plugin contract.
 - `MESHCORE_PUBLIC_TOOLSETS`, `MESHCORE_ADMIN_TOOLSETS`,
   `MESHCORE_MAX_MESSAGE_BYTES`, `MESHCORE_MAX_CHUNKS` and
   `MESHCORE_ADVERT_ON_START`.
+- Every message tells the model who sent it, and whether that sender is the
+  operator (verified by radio key). This stops the model treating everyone
+  on a public channel as the operator, using the operator's name, or
+  repeating their memory and profile. The README covers the stronger fix: a
+  separate profile with memory turned off.
 - `@[Name]` mentions, as sent by the MeshCore app.
 - New remote commands: `telemetry`, `acl` and `regions`, with parsed output.
 - A new test suite with a fake companion node over TCP, and CI that runs it.

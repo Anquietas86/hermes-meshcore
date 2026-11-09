@@ -121,6 +121,35 @@ anywhere in the message.
 Display names on channels are just text in the packet, so they are never used
 for authorization.
 
+## Public channels and your personal info
+
+Hermes puts your memory and `USER.md` profile into every system prompt,
+whoever is talking. Left alone, the model assumes everyone on the mesh is
+you: it greets strangers by your name and repeats your details. So each
+message now carries a note that says who sent it (with their sender id), and
+whether that sender is you. Only your verified radio key counts as you. A
+name, a claim, or a post on an admin channel does not. For anyone else, the
+note says:
+
+- your memory and profile describe a different person, so don't use your
+  name, assume shared history, or reveal anything from them;
+- on channels, several different people are talking, and every reply is
+  broadcast to everyone in radio range.
+
+Public senders also don't get the `memory` tool, unless you add it to
+`MESHCORE_PUBLIC_TOOLSETS`.
+
+Prompting lowers the risk, but it is not a hard guarantee. If the bot faces
+the public, the reliable fix is a separate Hermes profile for the mesh bot.
+Turn off memory injection in that profile's `config.yaml`, so your personal
+details are never in its prompt at all:
+
+```yaml
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+```
+
 ## How it behaves on a flaky link
 
 - One TCP connection per node. A node in use by another profile is refused
