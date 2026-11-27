@@ -56,8 +56,15 @@ class PolicyTests(unittest.TestCase):
         import toolsets
         self.assertEqual(toolsets.TOOLSETS[access.PUBLIC_TOOLSET]["tools"], ["mcp_openhop_status"])
         self.assertEqual(access.allowed_public_tools(["meshcore", "web"], ["mcp_openhop_status"]),
-                         {"meshcore_contact", "meshcore_nearby", "web_search", "web_extract",
+                         {"meshcore_contact", "meshcore_nearby", "web_search",
                           "mcp_openhop_status", "tool_search", "tool_describe"})
+
+    def test_web_extract_is_opt_in(self):
+        # It fetches any URL the model picks, so a public "web" toolset does not open it ...
+        self.assertNotIn("web_extract", access.allowed_public_tools(["web"], []))
+        self.assertIn("web_search", access.allowed_public_tools(["web"], []))
+        # ... but picking it by name does.
+        self.assertIn("web_extract", access.allowed_public_tools(["web"], ["web_extract"]))
 
     def test_discovery_tools_always_allowed(self):
         # Deferred MCP tools are invisible without tool_search/tool_describe, and neither is a

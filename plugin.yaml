@@ -1,7 +1,7 @@
 name: meshcore-platform
 label: MeshCore
 kind: platform
-version: 2.2.0
+version: 2.3.0
 description: >
   MeshCore LoRa mesh platform for Hermes Agent. Talks to a MeshCore
   companion radio over TCP and relays channel messages and DMs to the
@@ -46,7 +46,7 @@ optional_env:
     prompt: "Enable DMs?"
     password: false
   - name: MESHCORE_ADMIN_NODES
-    description: "Operator pubkeys or 8+ hex-char prefixes; their DMs get the profile's full toolsets and remote repeater queries"
+    description: "Operator pubkeys or 12+ hex-char prefixes (full keys are safest); their DMs get the profile's full toolsets and remote repeater queries"
     prompt: "Admin pubkey prefixes"
     password: false
   - name: MESHCORE_ADMIN_CHANNELS
@@ -54,7 +54,7 @@ optional_env:
     prompt: "Admin channel indexes"
     password: false
   - name: MESHCORE_PUBLIC_TOOLSETS
-    description: "Toolsets for non-admin senders (default meshcore,web: read-only lookups)"
+    description: "Toolsets for non-admin senders (default meshcore,web: read-only lookups; web_extract only if picked in MESHCORE_PUBLIC_TOOLS)"
     prompt: "Public toolsets"
     password: false
   - name: MESHCORE_PUBLIC_TOOLS

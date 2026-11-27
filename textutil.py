@@ -65,11 +65,16 @@ def split_for_mesh(text: str, limit: int, max_chunks: int = 0) -> List[str]:
     text = sanitize(text).strip()
     if len(text.encode("utf-8")) <= limit:
         return [text]
-    marker_room = len(" (99/99)")
-    body = split_bytes(text, limit - marker_room)
-    if max_chunks and len(body) > max_chunks:
-        body = body[:max_chunks]
-        body[-1] = _byte_prefix(body[-1], limit - marker_room - 3).rstrip() + "..."
+    digits = 1
+    while True:
+        marker_room = len(f" ({'9' * digits}/{'9' * digits})")
+        body = split_bytes(text, limit - marker_room)
+        if max_chunks and len(body) > max_chunks:
+            body = body[:max_chunks]
+            body[-1] = _byte_prefix(body[-1], limit - marker_room - 3).rstrip() + "..."
+        if len(str(len(body))) <= digits:
+            break
+        digits += 1  # more parts than the markers we left room for: split again with wider markers
     total = len(body)
     return [f"{chunk} ({i}/{total})" for i, chunk in enumerate(body, 1)]
 

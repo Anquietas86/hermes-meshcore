@@ -437,6 +437,7 @@ def cmd_anon_req(pubkey: bytes, sub_type: int, reply_path: bytes) -> bytes:
 # ── Client ───────────────────────────────────────────────────────────────
 
 PushHandler = Callable[[Frame], Awaitable[None]]
+UnclaimedHandler = Callable[[Frame], None]
 ClosedHandler = Callable[[Optional[BaseException]], Awaitable[None]]
 
 
@@ -497,14 +498,23 @@ class MeshCoreClient:
     ``on_push`` receives every push frame (>= 0x80) on a dedicated dispatcher
     task. ``on_closed`` is awaited once when the link drops unexpectedly
     (never after :meth:`close`).
+
+    The protocol has no request ids: a reply is matched to the command in
+    flight by its code. A reply that arrives after its command timed out is
+    therefore seen by the next command. ``on_unclaimed`` gets any such message
+    frame (a DM or channel message the node has already dequeued) instead of
+    it being thrown away. It is called synchronously while the request lock is
+    held, so it must not await node requests itself.
     """
 
     def __init__(self, host: str, port: int, *, on_push: Optional[PushHandler] = None,
-                 on_closed: Optional[ClosedHandler] = None, debug: bool = False) -> None:
+                 on_closed: Optional[ClosedHandler] = None, on_unclaimed: Optional[UnclaimedHandler] = None,
+                 debug: bool = False) -> None:
         self.host = host
         self.port = port
         self._on_push = on_push
         self._on_closed = on_closed
+        self._on_unclaimed = on_unclaimed
         self._debug = debug
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -626,10 +636,22 @@ class MeshCoreClient:
             raise MeshCoreClosed("connection lost while waiting for a reply")
         raise MeshCoreTimeout("no reply from node")
 
+    def _unclaimed(self, frame: Frame, during: Optional[int] = None) -> None:
+        """A reply nobody is waiting for: hand messages on, log the rest."""
+        if frame.code in MESSAGE_REPLIES and self._on_unclaimed is not None:
+            try:
+                self._on_unclaimed(frame)
+            except Exception:
+                logger.exception("MeshCore: unclaimed message handler failed")
+            return
+        if during is None:
+            logger.debug("MeshCore: discarding stale reply 0x%02x", frame.code)
+        else:
+            logger.debug("MeshCore: ignoring unexpected reply 0x%02x to 0x%02x", frame.code, during)
+
     def _drain_stale(self) -> None:
         while not self._responses.empty():
-            frame = self._responses.get_nowait()
-            logger.debug("MeshCore: discarding stale reply 0x%02x", frame.code)
+            self._unclaimed(self._responses.get_nowait())
 
     async def request(self, payload: bytes, accept: Iterable[int], timeout: float = 10.0) -> Frame:
         """Send one command and return its reply (one of ``accept`` or an ERROR frame)."""
@@ -642,7 +664,7 @@ class MeshCoreClient:
                 frame = await self._next_response(deadline)
                 if frame.code in wanted:
                     return frame
-                logger.debug("MeshCore: ignoring unexpected reply 0x%02x to 0x%02x", frame.code, payload[0])
+                self._unclaimed(frame, payload[0])
 
     async def _abandon_acquire(self, acquire: "asyncio.Future") -> None:
         acquire.cancel()
@@ -675,6 +697,9 @@ class MeshCoreClient:
             self._drain_stale()
             await self._send(bytes([CMD_GET_CONTACTS]))
             first = await self._next_response(deadline)
+            while first.code in MESSAGE_REPLIES:  # a late sync reply ahead of ours
+                self._unclaimed(first, CMD_GET_CONTACTS)
+                first = await self._next_response(deadline)
             if first.code != RESP_CONTACT_START:
                 raise MeshCoreError(f"GET_CONTACTS failed: {first.error_text() or hex(first.code)}")
             contacts: List[Dict[str, Any]] = []
@@ -687,6 +712,8 @@ class MeshCoreClient:
                         contacts.append(parse_contact(frame.body))
                     except ValueError as exc:
                         logger.debug("MeshCore: skipping malformed contact: %s", exc)
+                else:
+                    self._unclaimed(frame, CMD_GET_CONTACTS)
 
     async def wait_closed(self) -> None:
         await self._closed_event.wait()

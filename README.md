@@ -121,13 +121,13 @@ Then restart: `hermes gateway restart`.
 |---|---|---|
 | `MESHCORE_HOST` | (required) | Companion node hostname or IP |
 | `MESHCORE_PORT` | `5000` | TCP port |
-| `MESHCORE_ALLOWED_USERS` | | Pubkeys or prefixes allowed to DM. Prefixes of 8–11 chars are matched against known contacts |
+| `MESHCORE_ALLOWED_USERS` | | Pubkeys or prefixes (12+ hex chars) allowed to DM |
 | `MESHCORE_GROUP_ALLOWED_CHATS` | | `channel:N` list whose members may all talk to the bot |
 | `MESHCORE_ALLOW_ALL_USERS` | `false` | Anyone on the mesh may talk to the bot |
 | `MESHCORE_MONITOR_CHANNELS` | | Channel indexes to answer in. Empty means DMs only |
 | `MESHCORE_REQUIRE_MENTION` | | `true` = every monitored channel, `0,2` = only those, empty = none |
 | `MESHCORE_ENABLE_DMS` | `true` | Answer direct messages |
-| `MESHCORE_ADMIN_NODES` | | Operator pubkeys (8+ hex chars) |
+| `MESHCORE_ADMIN_NODES` | | Operator pubkeys or prefixes (12+ hex chars; full 64-char keys are safest) |
 | `MESHCORE_ADMIN_CHANNELS` | | Channels treated as trusted. Anyone with the channel key can post there |
 | `MESHCORE_PUBLIC_TOOLSETS` | `meshcore,web` | Toolsets for non-admin senders. Keep them read-only (`meshcore_admin` is always removed) |
 | `MESHCORE_PUBLIC_TOOLS` | | Extra single tools for non-admin senders (for example one read-only MCP tool). Easiest to pick on the dashboard |
@@ -135,7 +135,7 @@ Then restart: `hermes gateway restart`.
 | `MESHCORE_HOME_CHANNEL` | | `channel:N` or `dm:<prefix>` for cron delivery |
 | `MESHCORE_BOT_NAME` | node name | Name matched for @mentions |
 | `MESHCORE_MAX_MESSAGE_BYTES` | `130` | Bytes per packet (40–200) |
-| `MESHCORE_MAX_CHUNKS` | `6` | Packets per reply before truncating |
+| `MESHCORE_MAX_CHUNKS` | `6` | Packets per reply before truncating (at most 20) |
 | `MESHCORE_ADVERT_ON_START` | `true` | Flood advert when the gateway starts |
 | `MESHCORE_RATE_LIMIT` | `6/10m` | Messages per non-admin sender per window (`s`, `m`, `h`). `off` disables |
 | `MESHCORE_CHANNEL_CONTEXT` | `6` | Recent channel messages passed along with a mention (`0` = off) |
@@ -156,12 +156,22 @@ anywhere in the message.
 | | DM | Channel |
 |---|---|---|
 | Chat id | `dm:<12-hex prefix>` | `channel:<idx>` |
-| Sender id | pubkey prefix (cryptographic) | `channel:<idx>:<display name>` (claimed, not verified) |
+| Sender id | first 6 bytes of the sender's key (see below) | `channel:<idx>:<display name>` (claimed, not verified) |
 | Allowlist | `MESHCORE_ALLOWED_USERS` | `MESHCORE_GROUP_ALLOWED_CHATS` |
 | Admin | `MESHCORE_ADMIN_NODES` | `MESHCORE_ADMIN_CHANNELS` |
 
 Display names on channels are just text in the packet, so they are never used
 for authorization.
+
+A DM is only readable by your node if it comes from one of its contacts, but
+the node tells the plugin just the first 6 bytes (12 hex chars) of the
+sender's key. Keys and prefixes shorter than that are ignored. For admin
+nodes, the plugin also checks the sender's full key in the contact list
+against your entry, and it refuses admin when two contacts share those 6
+bytes. Someone could generate a key that matches a 12-char prefix (it takes a
+lot of computing, but it can be done). So put full 64-char keys in
+`MESHCORE_ADMIN_NODES`. If your node adds contacts automatically from
+adverts, a 12-char entry is the weakest point.
 
 ## Public channels and your personal info
 
@@ -182,6 +192,10 @@ The note also tells the model to help strangers with general information
 (weather, the mesh, propagation, news) and not to change anything on your
 behalf for them. Public senders get read-only tools only (`meshcore` and
 `web` by default), so no `memory`, files, terminal, cron or MCP servers.
+`web_extract` is held back even though it is in `web`. It fetches whatever URL
+the model picks, so a stranger could get the model to put your details into a
+URL, or reach hosts on your network. Tick it on the **Public access** card
+(or add it to `MESHCORE_PUBLIC_TOOLS`) if you want strangers to have it.
 
 If your weather, propagation or mesh data comes from an MCP server or
 another plugin, open just the tools you want on the dashboard's **Public

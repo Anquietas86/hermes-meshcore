@@ -85,6 +85,16 @@ class TextTests(unittest.TestCase):
         self.assertTrue(parts[0].endswith("(1/3)"))
         self.assertEqual(t.split_for_mesh("short", 60), ["short"])
 
+    def test_split_for_mesh_wide_markers_fit(self):
+        for limit, cap in ((60, 0), (60, 150)):
+            parts = t.split_for_mesh("word " * 2000, limit, max_chunks=cap)
+            self.assertGreaterEqual(len(parts), 100)
+            self.assertTrue(all(len(x.encode()) <= limit for x in parts), max(len(x.encode()) for x in parts))
+
+    def test_max_chunks_capped(self):
+        with mock.patch.dict(os.environ, {"MESHCORE_MAX_CHUNKS": "500"}):
+            self.assertEqual(adapter.Settings.load({}).max_chunks, 20)
+
     def test_plain_text(self):
         self.assertEqual(t.plain_text("**bold** and `code`"), "bold and code")
 

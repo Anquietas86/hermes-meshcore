@@ -33,6 +33,11 @@ DISCOVERY_TOOLS = frozenset({"tool_search", "tool_describe"})
 # Built-in tools known to only read. Everything else is "not marked read-only".
 KNOWN_READ_ONLY = frozenset({"web_search", "web_extract", "x_search", "vision_analyze",
                              "meshcore_contact", "meshcore_nearby"})
+# Read-only, but they fetch whatever URL the model picks. A prompt-injected public turn could
+# put the operator's private context into a URL, or reach hosts on the gateway's own network.
+# Public senders only get these when the operator picks them by name (MESHCORE_PUBLIC_TOOLS),
+# even when their toolset (e.g. "web") is public.
+OPT_IN_TOOLS = frozenset({"web_extract"})
 # Used when Hermes can't resolve toolsets for us.
 FALLBACK_TOOLSET_TOOLS = {"meshcore": {"meshcore_contact", "meshcore_nearby"},
                           "web": {"web_search", "web_extract"}, "search": {"web_search"}}
@@ -169,9 +174,11 @@ def public_toolset_list(public_toolsets: Iterable[str], public_tools: Iterable[s
 
 
 def allowed_public_tools(public_toolsets: Iterable[str], public_tools: Iterable[str]) -> Set[str]:
-    allowed: Set[str] = set(public_tools) | DISCOVERY_TOOLS
+    public_tools = set(public_tools)
+    from_toolsets: Set[str] = set()
     for name in public_toolsets:
-        allowed |= resolve_toolset_tools(name)
+        from_toolsets |= resolve_toolset_tools(name)
+    allowed = (from_toolsets - OPT_IN_TOOLS) | public_tools | DISCOVERY_TOOLS
     return allowed - ADMIN_ONLY_TOOLS
 
 
