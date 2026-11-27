@@ -55,6 +55,12 @@ ADMIN_SCHEMA = {
 }
 
 
+# Worst case for one binary query is a login and a request, up to 60 s each, possibly queued
+# behind a repeater-watch check of another node (same again). "all" adds three more requests.
+ADMIN_TIMEOUT = 270
+ADMIN_ALL_TIMEOUT = 450
+
+
 NEARBY_SCHEMA = {
     "name": "meshcore_nearby",
     "description": (
@@ -134,7 +140,7 @@ async def handle_admin(args: Dict[str, Any], **_kw) -> str:
         return json.dumps({"success": False, "error": (
             "Passwords are only accepted inside the gateway process (they are never written to disk). "
             "Ask from a MeshCore admin DM, or omit the password for guest access.")})
-    timeout = 240 if repeater.resolve_command(command) == "all" else 90
+    timeout = ADMIN_ALL_TIMEOUT if repeater.resolve_command(command) == "all" else ADMIN_TIMEOUT
     return json.dumps(await state.call_gateway("admin_query", {"node": node, "command": command}, timeout=timeout))
 
 

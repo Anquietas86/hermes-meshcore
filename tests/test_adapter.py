@@ -219,7 +219,7 @@ class InboundTests(AdapterTestBase):
 
 class PolicyTests(AdapterTestBase):
     env = {"MESHCORE_ADMIN_NODES": fn.FakeNode.ALICE[:16], "MESHCORE_ADMIN_CHANNELS": "1",
-           "MESHCORE_ALLOWED_USERS": "A1A1A1A1A1A1A1A1,b2b2b2b2,channel:1",
+           "MESHCORE_ALLOWED_USERS": "A1A1A1A1A1A1A1A1,b2b2b2b2,channel:1",  # b2b2b2b2 is too short
            "MESHCORE_PUBLIC_TOOLSETS": "meshcore,meshcore_admin,web"}
 
     def src(self, chat_type, chat_id, user_id=None):
@@ -238,8 +238,56 @@ class PolicyTests(AdapterTestBase):
     async def test_allowlist(self):
         self.assertEqual(self.adapter.config.extra["group_allowed_chats"], "channel:1")
         self.assertEqual(self.adapter.resolved_allowlist_user_ids(), {ALICE6})
-        await self.connect()  # contacts let the short prefix resolve
-        self.assertEqual(self.adapter.resolved_allowlist_user_ids(), {ALICE6, BOB6})
+        await self.connect()  # an 8-hex prefix no longer resolves against contacts
+        self.assertEqual(self.adapter.resolved_allowlist_user_ids(), {ALICE6})
+
+    async def test_admin_needs_12_hex(self):
+        with mock.patch.dict(os.environ, {"MESHCORE_ADMIN_NODES": fn.FakeNode.ALICE[:8]}):
+            s = A.Settings.load({})
+        self.assertEqual(s.admin_nodes, set())
+        self.assertFalse(self.adapter.is_admin_node(ALICE6[:8]))
+
+
+class AdminIdentityTests(AdapterTestBase):
+    """The radio reports only 6 key bytes per DM: make sure that is not enough to become admin."""
+    env = {"MESHCORE_ADMIN_NODES": fn.FakeNode.ALICE}  # full key
+
+    async def test_full_key_must_match_contact(self):
+        await self.connect()
+        self.assertTrue(self.adapter.is_admin_node(ALICE6))
+        # An impostor whose generated key shares Alice's first 6 bytes, while the real Alice is
+        # not a contact of this node: the prefix matches, the full key does not.
+        impostor = ALICE6 + "ee" * 26
+        self.adapter._contacts = {impostor: dict(self.adapter._contacts[fn.FakeNode.ALICE], public_key=impostor)}
+        self.assertFalse(self.adapter.is_admin_node(ALICE6))
+
+    async def test_ambiguous_prefix_is_not_admin(self):
+        await self.connect()
+        impostor = ALICE6 + "ee" * 26
+        self.adapter._contacts[impostor] = dict(self.adapter._contacts[fn.FakeNode.ALICE], public_key=impostor)
+        self.assertFalse(self.adapter.is_admin_node(ALICE6))
+        await self.node.deliver(p.RESP_CONTACT_MSG_V3, fn.contact_msg_body(ALICE6, "/status"))
+        await self.wait_for(lambda: self.adapter.events)
+        self.assertFalse(self.adapter.events[0].allow_gateway_control)
+        self.assertIn("NOT your operator", self.adapter.events[0].channel_prompt)
+
+    async def test_prefix_entry_checks_known_contact(self):
+        self.adapter.settings.admin_nodes = {fn.FakeNode.ALICE[:16]}
+        await self.connect()
+        self.assertTrue(self.adapter.is_admin_node(ALICE6))
+        impostor = ALICE6 + "ee" * 26
+        self.adapter._contacts = {impostor: dict(self.adapter._contacts[fn.FakeNode.ALICE], public_key=impostor)}
+        self.assertFalse(self.adapter.is_admin_node(ALICE6))  # 16-hex entry, contact key differs at hex 13
+
+
+class LateReplyTests(AdapterTestBase):
+    async def test_message_after_sync_timeout_is_not_lost(self):
+        await self.connect()
+        frame = p.Frame(p.RESP_CONTACT_MSG_V3, fn.contact_msg_body(BOB6, "late hello", ts=999))
+        # What the client does with a message reply that reaches the next command
+        self.adapter._client._responses.put_nowait(frame)
+        await self.adapter._client.request(bytes([p.CMD_GET_BATT_AND_STORAGE]), [p.RESP_BATTERY], timeout=3)
+        await self.wait_for(lambda: [e.text for e in self.adapter.events] == ["late hello"])
 
 
 class OutboundTests(AdapterTestBase):

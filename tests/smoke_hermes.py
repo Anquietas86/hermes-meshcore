@@ -104,7 +104,7 @@ async def check_public_access(adapter, ctx, source) -> None:
     try:
         assert hook(tool_name="web_search", args={}) is None
         assert hook(tool_name="meshcore_contact", args={}) is None
-        for tool in ("terminal", "meshcore_admin", "mcp_homeassistant_HassTurnOn"):
+        for tool in ("terminal", "meshcore_admin", "mcp_homeassistant_HassTurnOn", "web_extract"):
             verdict = hook(tool_name=tool, args={})
             assert verdict and verdict["action"] == "block" and verdict["message"], (tool, verdict)
     finally:

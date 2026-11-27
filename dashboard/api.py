@@ -76,7 +76,7 @@ def _meshcore_home() -> Path:
 state.hermes_home = _meshcore_home
 router = APIRouter()
 
-_HEX_LIST = re.compile(r"^(?:[0-9a-fA-F]{8,64})(?:,[0-9a-fA-F]{8,64})*$")
+_HEX_LIST = re.compile(r"^(?:[0-9a-fA-F]{12,64})(?:,[0-9a-fA-F]{12,64})*$")  # 12 hex = what a DM carries
 _INT_LIST = re.compile(r"^(?:\d{1,3})(?:,\d{1,3})*$")
 _CHAT_LIST = re.compile(r"^(?:channel:\d{1,3})(?:,channel:\d{1,3})*$")
 _BOOL = {"true", "false"}
@@ -155,8 +155,9 @@ def _write_env(updates: Dict[str, str]) -> None:
         key = stripped.partition("=")[0].strip()
         if key.startswith("export "):
             key = key[7:].strip()
-        if stripped and not stripped.startswith("#") and key in pending:
-            value = pending.pop(key)
+        if stripped and not stripped.startswith("#") and key in updates:
+            # First occurrence takes the new value; later duplicates go (they would win otherwise).
+            value = pending.pop(key, "")
             if value:
                 out.append(f"{key}={value}\n")
             continue
@@ -245,12 +246,7 @@ async def get_config():
 
 @router.post("/config")
 async def update_config(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    body = await _json_body(request)
     unknown = sorted(set(body) - set(CONFIG_FIELDS))
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown config keys: {', '.join(unknown)}")
@@ -323,8 +319,9 @@ def _explain(p, exc: BaseException) -> str:
 
 
 @router.post("/restart")
-async def restart_gateway():
+async def restart_gateway(request: Request):
     """Ask Hermes to restart the gateway. Detached: the gateway may host this very dashboard."""
+    _require_json(request)
     env = dict(os.environ, HERMES_HOME=str(state.hermes_home()))
     try:
         await asyncio.create_subprocess_exec(
@@ -340,10 +337,7 @@ async def restart_gateway():
 
 @router.post("/admin/query")
 async def submit_admin_query(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    body = await _json_body(request)
     node = str(body.get("node", "")).strip()
     command = str(body.get("command", "")).strip()
     if not node or not command:
@@ -423,7 +417,17 @@ async def remove_channel(request: Request):
     return JSONResponse({"success": True, "request_id": request_id})
 
 
+def _require_json(request: Request) -> None:
+    """POSTs must say they are JSON. A cross-site form can't set that header without a CORS
+    preflight, so this keeps other web pages from driving these endpoints (defence in depth on
+    top of the dashboard's own auth)."""
+    ctype = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(status_code=415, detail="Expected Content-Type: application/json")
+
+
 async def _json_body(request: Request) -> Dict[str, Any]:
+    _require_json(request)
     try:
         body = await request.json()
     except Exception:
@@ -434,7 +438,8 @@ async def _json_body(request: Request) -> Dict[str, Any]:
 
 
 @router.post("/advert")
-async def trigger_advert():
+async def trigger_advert(request: Request):
+    _require_json(request)
     snap = state.read_state()
     if not snap.get("fresh"):
         raise HTTPException(status_code=503, detail=snap.get("error") or "Gateway not running")

@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.3.0
+
+### Security
+
+- Admin keys need at least 12 hex characters (`MESHCORE_ADMIN_NODES` and
+  `MESHCORE_ALLOWED_USERS`). Shorter entries are ignored with a warning, and
+  the dashboard refuses them. An 8-character admin prefix is only 32 bits: a
+  generated key could match it in minutes and get operator access over DM.
+  Allowlist prefixes of 8-11 characters are no longer matched against contacts.
+- Admin DMs are checked against the sender's full key. The radio only reports
+  the first 6 key bytes, so the plugin now looks up the sender's contact and
+  requires its key to start with your entry (a full 64-character entry pins the
+  exact key). When two contacts share the same 6 bytes, nobody gets admin.
+- `web_extract` is opt-in for public senders even when the `web` toolset is
+  public. It fetches any URL, which gives a prompt-injected turn a way to send
+  out private context or reach hosts on the gateway's network. Pick it on the
+  Public access card to allow it.
+- Rate-limit notices only go to senders the gateway will answer (admins,
+  allowlisted keys, or everyone with `MESHCORE_ALLOW_ALL_USERS`). Strangers
+  outside the allowlist no longer get a DM back.
+- Dashboard POST endpoints require `Content-Type: application/json`, so another
+  web page cannot drive them with a plain form post.
+
+### Fixed
+
+- A DM or channel message that reaches the gateway after its sync request
+  timed out is now delivered. Before, the next command discarded it, and the
+  node had already dequeued it, so it was lost. The companion protocol has no
+  request ids, so a late `OK`/`ERROR` can still be credited to the next
+  command.
+- Repeater watch keeps its silence clock and open problems across gateway
+  restarts (`.meshcore/watch.json`). A restart used to reset the clock, so a
+  dead repeater was reported late, or never if the gateway restarted often.
+- Rate-limit notices are sent off the inbound path, so waiting for their ACK
+  no longer holds up the next message.
+- A channel message refused by the channel-wide rate limit no longer uses up
+  its sender's own quota.
+- Admin query waits now cover the worst case. That is 270 s for one command and
+  450 s for `all`, which includes waiting behind a repeater-watch check. The
+  dashboard waits the same.
+- `MESHCORE_MAX_CHUNKS` is capped at 20. Part markers leave room for
+  3-digit counts if `split_for_mesh` is used with more parts.
+- The dashboard's `.env` writer drops later duplicates of a key it updates,
+  which would otherwise override the new value.
+- The dashboard manifest version matches the plugin again.
+
+### Changed
+
+- `Settings` moved to `settings.py` and the per-turn prompts to `prompts.py`.
+  `adapter.py` re-exports both.
+
 ## 2.2.0
 
 ### Added

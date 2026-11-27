@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from _load import adapter as A, protocol as p, textutil, tools
+from gateway.config import PlatformConfig
 import fakenode as fn
 from test_adapter import ALICE6, BOB6, AdapterTestBase
 
@@ -112,7 +113,8 @@ class SendingTests(AdapterTestBase):
 
 
 class RateLimitTests(AdapterTestBase):
-    env = {"MESHCORE_RATE_LIMIT": "2/1m", "MESHCORE_ADMIN_NODES": fn.FakeNode.ALICE}
+    env = {"MESHCORE_RATE_LIMIT": "2/1m", "MESHCORE_ADMIN_NODES": fn.FakeNode.ALICE,
+           "MESHCORE_ALLOWED_USERS": BOB6}
 
     async def test_dm_rate_limit_with_one_notice(self):
         await self.connect()
@@ -123,6 +125,21 @@ class RateLimitTests(AdapterTestBase):
         self.assertEqual([e.text for e in self.adapter.events], ["msg 0", "msg 1"])
         notices = [x for x in self.node.sent(p.CMD_SEND_TXT_MSG) if b"Too many" in x]
         self.assertEqual(len(notices), 1)
+
+    async def test_no_notice_for_senders_the_gateway_ignores(self):
+        self.adapter.settings.allowed_users = set()
+        await self.connect()
+        for i in range(4):
+            await self.node.deliver(p.RESP_CONTACT_MSG_V3, fn.contact_msg_body(BOB6, f"msg {i}", ts=300 + i))
+        await self.wait_for(lambda: not self.node.inbox)
+        await asyncio.sleep(0.3)
+        self.assertEqual([x for x in self.node.sent(p.CMD_SEND_TXT_MSG) if b"Too many" in x], [])
+
+    async def test_refused_channel_message_does_not_use_up_sender_quota(self):
+        self.adapter.settings.rate_limit = (1, 60.0)
+        self.assertTrue(self.adapter._allow_rate(("a", 1), ("ch", 1)))
+        self.assertFalse(self.adapter._allow_rate(("b", 1), ("ch", 1)))  # channel full
+        self.assertEqual(len(self.adapter._rate["b"]), 0)
 
     async def test_admin_exempt(self):
         await self.connect()
@@ -211,6 +228,21 @@ class WatchTests(AdapterTestBase):
         self.adapter._watch["Hilltop RPT"]["advert_seen_at"] -= 13 * 3600
         await self.adapter._watch_once()
         self.assertEqual(self.alerts(), ["Watch: Hilltop RPT - no advert heard for 13h"])
+
+    async def test_silence_clock_and_problems_survive_a_restart(self):
+        self.adapter.settings.watch_status = False
+        await self.connect()
+        await self.adapter._watch_once()
+        self.adapter._watch["Hilltop RPT"]["advert_seen_at"] -= 13 * 3600
+        await self.adapter._watch_once()
+        self.assertEqual(len(self.alerts()), 1)
+        await self.adapter.disconnect()
+        self.adapter = A.MeshCoreAdapter(PlatformConfig(extra={}))  # a gateway restart
+        self.adapter.settings.watch_status = False
+        await self.connect()
+        await self.adapter._watch_once()
+        self.assertGreaterEqual(self.adapter._watch["Hilltop RPT"]["silent_hours"], 13)
+        self.assertEqual(len(self.alerts()), 1)  # still silent, already reported: no repeat
 
     async def test_notify_target_and_loop_started(self):
         self.adapter.settings.watch_notify = "channel:1"

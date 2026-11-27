@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 STATE_DIR_NAME = ".meshcore"
 STATE_FILE = "state.json"
+WATCH_FILE = "watch.json"
 REQUESTS_DIR = "requests"
 RESPONSES_DIR = "responses"
 STATE_FRESH_SECONDS = 90
@@ -134,6 +135,16 @@ def read_state(home: Optional[Path] = None) -> Dict[str, Any]:
     if not data["fresh"]:
         data["connected"] = False
     return data
+
+
+def read_watch(home: Optional[Path] = None) -> Dict[str, Any]:
+    """Saved repeater-watch progress (silence clock, open problems) keyed by watch query."""
+    data = read_json(state_dir(home, create=False) / WATCH_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def write_watch(data: Dict[str, Any], home: Optional[Path] = None) -> None:
+    write_json(state_dir(home) / WATCH_FILE, data)
 
 
 # ── Request / response IPC ───────────────────────────────────────────────

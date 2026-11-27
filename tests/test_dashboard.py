@@ -63,6 +63,23 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(r.status_code, 400, body)
         self.assertFalse(self.env_file.exists())
 
+    def test_duplicate_keys_do_not_override_the_new_value(self):
+        self.env_file.write_text("MESHCORE_MONITOR_CHANNELS=0\nOTHER=1\nMESHCORE_MONITOR_CHANNELS=5\n")
+        self.client.post(self.url("/config"), json={"monitor_channels": "2"})
+        self.assertEqual(self.env_file.read_text(), "MESHCORE_MONITOR_CHANNELS=2\nOTHER=1\n")
+
+    def test_short_keys_rejected(self):
+        for key in ("admin_nodes", "allowed_users"):
+            self.assertEqual(self.client.post(self.url("/config"), json={key: "a1b2c3d4"}).status_code, 400)
+            self.assertEqual(self.client.post(self.url("/config"), json={key: "a1b2c3d4e5f6"}).status_code, 200)
+
+    def test_posts_must_be_json(self):
+        for path in ("/config", "/restart", "/advert", "/channels", "/admin/query"):
+            r = self.client.post(self.url(path), content='{"monitor_channels": "1"}',
+                                 headers={"Content-Type": "text/plain"})
+            self.assertEqual(r.status_code, 415, path)
+        self.assertFalse(self.env_file.exists())
+
     def test_clearing_a_value_removes_the_line(self):
         self.env_file.write_text("MESHCORE_ADMIN_CHANNELS=3\n")
         self.client.post(self.url("/config"), json={"admin_channels": ""})

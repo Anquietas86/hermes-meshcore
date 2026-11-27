@@ -148,7 +148,7 @@
       setBusy(true); setResult(null);
       post("/admin/query", { node: node, command: cmd }).then(function (r) {
         var started = Date.now();
-        var limit = cmd === "all" ? 260000 : 110000;
+        var limit = cmd === "all" ? 460000 : 280000;
         timer.current = setInterval(function () {
           api("/admin/result?request_id=" + encodeURIComponent(r.request_id)).then(function (res) {
             if (res.status === "complete") {
